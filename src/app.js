@@ -75,6 +75,7 @@ const state = {
   practiceFilterPos: new Set(),
   practiceFilterAcc: null,
   practicePageSize: 50,
+  practiceRandomCount: 20,
   practicePage: 0,
   practiceResults: {},
   practiceMode: 'flip',
@@ -1474,27 +1475,56 @@ function renderPracticeSelect() {
             ? `${selCount} card${selCount !== 1 ? 's' : ''} selected · ${filtered.length} shown`
             : `${state.cards.length} cards · ${filtered.length} shown`),
       ),
-      h('div', { class: 'page-header-actions' },
-        h('div', { class: 'mode-toggle' },
+      h('div', { class: 'practice-header-actions' },
+        h('div', { class: 'practice-header-row1' },
+          h('div', { class: 'mode-toggle' },
+            h('button', {
+              class: `mode-toggle-btn${state.practiceMode === 'flip' ? ' active' : ''}`,
+              onClick: () => { state.practiceMode = 'flip'; render(); },
+            }, '◎ Flashcard'),
+            h('button', {
+              class: `mode-toggle-btn${state.practiceMode === 'type' ? ' active' : ''}`,
+              onClick: () => { state.practiceMode = 'type'; render(); },
+            }, '✎ Word'),
+          ),
           h('button', {
-            class: `mode-toggle-btn${state.practiceMode === 'flip' ? ' active' : ''}`,
-            onClick: () => { state.practiceMode = 'flip'; render(); },
-          }, '◎ Flashcard'),
-          h('button', {
-            class: `mode-toggle-btn${state.practiceMode === 'type' ? ' active' : ''}`,
-            onClick: () => { state.practiceMode = 'type'; render(); },
-          }, '✎ Word'),
+            class: 'btn-primary',
+            disabled: selCount === 0,
+            onClick: selCount > 0 ? startPractice : null,
+          }, `▶ Start${selCount > 0 ? ` (${selCount})` : ''}`),
         ),
-        h('button', { class: 'btn-ghost', onClick: () => {
-          if (allVisibleSelected) filtered.forEach(c => state.practiceSelected.delete(c.id));
-          else                    filtered.forEach(c => state.practiceSelected.add(c.id));
-          render();
-        }}, allVisibleSelected ? 'Deselect all' : 'Select all'),
-        h('button', {
-          class: 'btn-primary',
-          disabled: selCount === 0,
-          onClick: selCount > 0 ? startPractice : null,
-        }, `▶ Start${selCount > 0 ? ` (${selCount})` : ''}`),
+        h('div', { class: 'practice-header-row2' },
+          h('button', { class: 'btn-ghost btn-sm', onClick: () => {
+            if (allVisibleSelected) filtered.forEach(c => state.practiceSelected.delete(c.id));
+            else                    filtered.forEach(c => state.practiceSelected.add(c.id));
+            render();
+          }}, allVisibleSelected ? 'Deselect all' : 'Select all'),
+          h('div', { class: 'random-pick' },
+            (() => {
+              const inp = h('input', {
+                class: 'random-pick-input',
+                type: 'number', min: '1', max: String(filtered.length || 1),
+                value: String(Math.min(state.practiceRandomCount, filtered.length || 1)),
+              });
+              inp.addEventListener('change', e => {
+                const v = Math.max(1, parseInt(e.target.value) || 1);
+                state.practiceRandomCount = v;
+                render();
+              });
+              return inp;
+            })(),
+            h('button', {
+              class: 'btn-ghost btn-sm',
+              disabled: filtered.length === 0,
+              onClick: () => {
+                const n = Math.min(state.practiceRandomCount, filtered.length);
+                const shuffled = [...filtered].sort(() => Math.random() - 0.5).slice(0, n);
+                state.practiceSelected = new Set(shuffled.map(c => c.id));
+                render();
+              },
+            }, '⚄ Random'),
+          ),
+        ),
       ),
     ),
 
@@ -1803,6 +1833,13 @@ function buildPracticeFlashcard(card, bInfo) {
     h('div', { class: 'card-section' },
       h('span', { class: 'card-sec-label' }, 'Definition'),
       h('p',    { class: 'card-sec-body'  }, card.description_lang1),
+    ),
+  );
+  if (!card.reversed && card.example_sentences) backChildren.push(
+    h('hr', { class: 'card-divider' }),
+    h('div', { class: 'card-section' },
+      h('span', { class: 'card-sec-label' }, 'Examples'),
+      h('p',    { class: 'card-sec-body'  }, card.example_sentences),
     ),
   );
 
