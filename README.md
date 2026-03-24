@@ -2,6 +2,8 @@
 
 Enhanced Memory Optimization (EMO) is based on the spaced repetition principle, aiming to improve long-term retention by adaptively scheduling reviews according to memory strength.
 
+![Teaser](figures/main.png "Teaser")
+
 ## Functions
 - [X] Practice mode
 - [X] Study mode (Leitner System)
