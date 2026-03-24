@@ -166,7 +166,13 @@ input,select,textarea { font-family:inherit; }
 .study-done h2 { font-family:var(--font-d); font-size:28px; font-weight:400; }
 .study-done p  { color:var(--text-2); font-size:14px; }
 .done-actions  { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
-.study-direction { display:flex; justify-content:center; margin:4px 0 12px; }
+.study-direction { display:flex; justify-content:center; margin:4px 0 8px; }
+.status-strip { display:flex; flex-wrap:wrap; gap:5px; justify-content:center; padding:6px 16px 10px; max-width:600px; margin:0 auto; }
+.status-dot { width:9px; height:9px; border-radius:50%; background:var(--bg-3); border:1px solid var(--border-2); transition:background .2s,border-color .2s; flex-shrink:0; }
+.status-dot.current { outline:2px solid var(--accent); outline-offset:2px; }
+.status-dot.correct { background:var(--green); border-color:var(--green); }
+.status-dot.wrong   { background:var(--red);   border-color:var(--red); }
+.status-dot.partial { background:var(--accent); border-color:var(--accent); opacity:.55; }
 .dir-badge { font-size:12px; font-weight:600; color:var(--text-3); background:var(--bg-3); border:1px solid var(--border); border-radius:20px; padding:4px 14px; }
 .dir-badge.dir-reverse { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 35%,transparent); background:color-mix(in srgb,var(--accent) 8%,transparent); }
 .study-nav { display:flex; justify-content:space-between; padding:0 4px; margin-top:12px; }

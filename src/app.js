@@ -76,6 +76,7 @@ const state = {
   practiceFilterAcc: null,
   practicePageSize: 50,
   practicePage: 0,
+  practiceResults: {},
   practiceMode: 'flip',
   practiceQueue: [],
   practiceIdx: 0,
@@ -359,17 +360,18 @@ function renderStudyEmpty() {
 }
 
 function renderStudyDone() {
-  const acc = state.studyTotal > 0
-    ? Math.round((state.studyCorrect / state.studyTotal) * 100) : 0;
+  const uniqueTotal  = getUniqueIds(state.studyQueue).length;
+  const wrongCount   = state.studyWrong.length;
+  const correctCount = uniqueTotal - wrongCount;
+  const acc          = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
 
-  const wrongCount = state.studyWrong.length;
   return h('div', { class: 'study-done' },
     h('div', { class: 'done-icon' }, '✦'),
     h('h2', {}, 'Session Complete!'),
     h('div', { class: 'done-stats' },
-      doneStatEl(state.studyTotal,   'Reviewed'),
-      doneStatEl(state.studyCorrect, 'Correct'),
-      doneStatEl(`${acc}%`,          'Accuracy'),
+      doneStatEl(uniqueTotal,   'Reviewed'),
+      doneStatEl(correctCount,  'Correct'),
+      doneStatEl(`${acc}%`,     'Accuracy'),
     ),
     h('div', { class: 'done-actions' },
       h('button', { class: 'btn-primary', onClick: () => navigate('dashboard') }, 'Back to Overview'),
@@ -402,11 +404,43 @@ function doneStatEl(val, lbl) {
   );
 }
 
+function getUniqueIds(queue) {
+  const seen = new Set();
+  const ids = [];
+  for (const item of queue) {
+    if (!seen.has(item.id)) { seen.add(item.id); ids.push(item.id); }
+  }
+  return ids;
+}
+
+function cardStatus(id, results) {
+  const r = results[id];
+  if (!r) return 'pending';
+  const fDone = r.forward !== null;
+  const rDone = r.reverse !== null;
+  if (!fDone && !rDone) return 'pending';
+  if (fDone && rDone) return (r.forward && r.reverse) ? 'correct' : 'wrong';
+  return (r.forward === false || r.reverse === false) ? 'wrong' : 'partial';
+}
+
+function buildStatusStrip(queue, results, currentId) {
+  const ids = getUniqueIds(queue);
+  return h('div', { class: 'status-strip' },
+    ...ids.map(id => h('div', {
+      class: `status-dot${id === currentId ? ' current' : ''} ${cardStatus(id, results)}`,
+    })),
+  );
+}
+
 function renderStudyCard() {
-  const item  = state.studyQueue[state.studyIdx];
-  const total = state.studyQueue.length;
-  const pct   = (state.studyIdx / total) * 100;
-  const bInfo = getBoxes()[item.box_number - 1];
+  const item        = state.studyQueue[state.studyIdx];
+  const total       = state.studyQueue.length;
+  const pct         = (state.studyIdx / total) * 100;
+  const bInfo       = getBoxes()[item.box_number - 1];
+  const uniqueIds   = getUniqueIds(state.studyQueue);
+  const uniqueTotal = uniqueIds.length;
+  const doneCount   = uniqueIds.filter(id => { const r = state.studyResults[id]; return r && r.forward !== null && r.reverse !== null; }).length;
+  const correctCount = uniqueIds.filter(id => { const r = state.studyResults[id]; return r && r.forward === true && r.reverse === true; }).length;
 
   const wrap = h('div', { class: 'study-wrap' },
     // header
@@ -414,12 +448,12 @@ function renderStudyCard() {
       h('button', { class: 'back-btn', onClick: () => navigate('dashboard') }, '← Exit'),
       h('div', { class: 'prog-wrap' },
         h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
-        h('span', { class: 'prog-txt' }, `${state.studyIdx + 1} / ${total}`),
+        h('span', { class: 'prog-txt' }, `${doneCount} / ${uniqueTotal}`),
       ),
       h('div', { class: 'session-score' },
-        h('span', { class: 'score-ok'  }, String(state.studyCorrect)),
+        h('span', { class: 'score-ok'  }, String(correctCount)),
         h('span', { class: 'score-sep' }, '/'),
-        h('span', { class: 'score-tot' }, String(state.studyTotal)),
+        h('span', { class: 'score-tot' }, String(uniqueTotal)),
       ),
     ),
 
@@ -429,6 +463,9 @@ function renderStudyCard() {
         item.reversed ? '↩ Recall the word' : '→ Recall the translation',
       ),
     ),
+
+    // status strip
+    buildStatusStrip(state.studyQueue, state.studyResults, item.id),
 
     // card stage
     h('div', { class: 'card-stage' },
@@ -1612,6 +1649,7 @@ function startPractice() {
   state.practiceAnimating   = false;
   state.practiceTyped       = '';
   state.practiceTypedResult = null;
+  state.practiceResults     = {};
   navigate('practice');
 }
 
@@ -1621,15 +1659,23 @@ function renderPractice() {
 }
 
 function renderPracticeDone() {
-  const acc = state.practiceTotal > 0
-    ? Math.round((state.practiceCorrect / state.practiceTotal) * 100) : 0;
+  const uniqueIds    = getUniqueIds(state.practiceQueue);
+  const uniqueTotal  = uniqueIds.length;
+  const isFlip       = state.practiceMode === 'flip';
+  const correctCount = uniqueIds.filter(id => {
+    const r = state.practiceResults[id];
+    if (!r) return false;
+    return isFlip ? (r.forward === true && r.reverse === true) : r.forward === true;
+  }).length;
+  const acc = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
+
   return h('div', { class: 'study-done' },
     h('div', { class: 'done-icon' }, '✦'),
     h('h2', {}, 'Practice Complete!'),
     h('div', { class: 'done-stats' },
-      doneStatEl(state.practiceTotal,   'Reviewed'),
-      doneStatEl(state.practiceCorrect, 'Correct'),
-      doneStatEl(`${acc}%`,             'Accuracy'),
+      doneStatEl(uniqueTotal,   'Reviewed'),
+      doneStatEl(correctCount,  'Correct'),
+      doneStatEl(`${acc}%`,     'Accuracy'),
     ),
     h('div', { class: 'done-actions' },
       h('button', { class: 'btn-ghost', onClick: () => navigate('practice-select') }, '← Back to selection'),
@@ -1641,6 +1687,7 @@ function renderPracticeDone() {
         state.practiceCorrect   = 0;
         state.practiceTotal     = 0;
         state.practiceAnimating = false;
+        state.practiceResults   = {};
         render();
       }}, '↺ Practice again'),
     ),
@@ -1648,22 +1695,26 @@ function renderPracticeDone() {
 }
 
 function renderPracticeCard() {
-  const card  = state.practiceQueue[state.practiceIdx];
-  const total = state.practiceQueue.length;
-  const pct   = (state.practiceIdx / total) * 100;
-  const bInfo = getBoxes()[card.box_number - 1];
+  const card         = state.practiceQueue[state.practiceIdx];
+  const total        = state.practiceQueue.length;
+  const pct          = (state.practiceIdx / total) * 100;
+  const bInfo        = getBoxes()[card.box_number - 1];
+  const uniqueIds    = getUniqueIds(state.practiceQueue);
+  const uniqueTotal  = uniqueIds.length;
+  const doneCount    = uniqueIds.filter(id => { const r = state.practiceResults[id]; return r && r.forward !== null && r.reverse !== null; }).length;
+  const correctCount = uniqueIds.filter(id => { const r = state.practiceResults[id]; return r && r.forward === true && r.reverse === true; }).length;
 
   return h('div', { class: 'study-wrap' },
     h('div', { class: 'study-header' },
       h('button', { class: 'back-btn', onClick: () => navigate('practice-select') }, '← Exit'),
       h('div', { class: 'prog-wrap' },
         h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
-        h('span', { class: 'prog-txt' }, `${state.practiceIdx + 1} / ${total}`),
+        h('span', { class: 'prog-txt' }, `${doneCount} / ${uniqueTotal}`),
       ),
       h('div', { class: 'session-score' },
-        h('span', { class: 'score-ok'  }, String(state.practiceCorrect)),
+        h('span', { class: 'score-ok'  }, String(correctCount)),
         h('span', { class: 'score-sep' }, '/'),
-        h('span', { class: 'score-tot' }, String(state.practiceTotal)),
+        h('span', { class: 'score-tot' }, String(uniqueTotal)),
       ),
     ),
 
@@ -1672,6 +1723,8 @@ function renderPracticeCard() {
         card.reversed ? '↩ Recall the word' : '→ Recall the translation',
       ),
     ),
+
+    buildStatusStrip(state.practiceQueue, state.practiceResults, card.id),
 
     h('div', { class: 'card-stage' },
       buildPracticeFlashcard(card, bInfo),
@@ -1781,8 +1834,13 @@ async function doPractice(correct) {
   if (state.practiceAnimating) return;
   state.practiceAnimating = true;
 
+  const card = state.practiceQueue[state.practiceIdx];
   const fc = el('.flashcard');
   if (fc) fc.classList.add('exit');
+
+  if (!state.practiceResults[card.id]) state.practiceResults[card.id] = { forward: null, reverse: null };
+  if (card.reversed) state.practiceResults[card.id].reverse = correct;
+  else               state.practiceResults[card.id].forward = correct;
 
   state.practiceTotal += 1;
   if (correct) state.practiceCorrect += 1;
