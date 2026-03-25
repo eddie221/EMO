@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::Local;
 use rusqlite::params;
 use tauri::State;
 use uuid::Uuid;
@@ -70,7 +70,7 @@ pub fn get_all_cards(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
 #[tauri::command]
 pub fn get_due_cards(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let mut stmt = conn
         .prepare(&format!(
             "{} WHERE next_review <= ?1 ORDER BY box_number ASC, next_review ASC",
@@ -86,7 +86,7 @@ pub fn add_card(state: State<DbState>, card: CreateFlashcard) -> Result<Flashcar
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
     let id = Uuid::new_v4().to_string();
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let box_num = card.box_number.unwrap_or(1).clamp(1, 5);
     let next_review = next_review_date(box_num, &box_days);
     conn.execute(
@@ -126,7 +126,7 @@ pub fn update_card(
     card: CreateFlashcard,
 ) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     conn.execute(
         "UPDATE flashcards SET lang1=?1, lang2=?2, description_lang1=?3,
          part_of_speech=?4, example_sentences=?5, usage_frequency=?6, updated_at=?7 WHERE id=?8",
@@ -153,7 +153,7 @@ pub fn delete_card(state: State<DbState>, id: String) -> Result<(), String> {
 pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashcard, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let (current_box, total_reviews, correct_reviews): (i32, i32, i32) = conn
         .query_row(
             "SELECT box_number, total_reviews, correct_reviews FROM flashcards WHERE id=?1",
@@ -193,7 +193,7 @@ pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashc
 #[tauri::command]
 pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let total_cards: i32 = conn
         .query_row("SELECT COUNT(*) FROM flashcards", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
@@ -229,7 +229,7 @@ pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
 pub fn reset_card(state: State<DbState>, id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     conn.execute(
         "UPDATE flashcards SET box_number=1, next_review=?1, updated_at=?2 WHERE id=?3",
         params![next_review_date(1, &box_days), now, id],
@@ -243,7 +243,7 @@ pub fn move_card(state: State<DbState>, id: String, box_number: i32) -> Result<(
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
     let box_num = box_number.clamp(1, 5);
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let next_review = next_review_date(box_num, &box_days);
     conn.execute(
         "UPDATE flashcards SET box_number=?1, next_review=?2, updated_at=?3 WHERE id=?4",

@@ -36,6 +36,16 @@ const USAGE_FREQUENCIES = [
   'very common','common','uncommon','rare','archaic',
 ];
 
+const icon = name => h('i', { class: `bi bi-${name}`, 'aria-hidden': 'true' });
+
+const CONFLICT_FIELDS = [
+  { key: 'lang2',             label: 'Translation'   },
+  { key: 'description_lang1', label: 'Description'   },
+  { key: 'part_of_speech',    label: 'Part of speech'},
+  { key: 'example_sentences', label: 'Examples'      },
+  { key: 'usage_frequency',   label: 'Frequency'     },
+];
+
 // ── State ──────────────────────────────────────────────────────────────────
 const state = {
   view: 'dashboard',
@@ -58,9 +68,10 @@ const state = {
   libFilterBox: new Set(),
   libFilterPos: new Set(),
   libFilterAcc: null,
+  libFilterDue: false,
   libExpanded: null,
-  libConfirmDelete: null,
-  libBatchConfirmDelete: false,
+  confirmModal: null,
+  importConflicts: null,
   libSelected: new Set(),
   libSelectMode: false,
   showImportHelp: false,
@@ -74,6 +85,7 @@ const state = {
   practiceFilterBox: null,
   practiceFilterPos: new Set(),
   practiceFilterAcc: null,
+  practiceFilterDue: false,
   practicePageSize: 50,
   practiceRandomCount: 20,
   practicePage: 0,
@@ -92,13 +104,11 @@ const state = {
 
 // ── API ─────────────────────────────────────────────────────────────────────
 const api = {
-  getAllCards:  ()           => invoke('get_all_cards'),
-  getDueCards:  ()           => invoke('get_due_cards'),
+  getAllCards:  ()            => invoke('get_all_cards'),
   addCard:      (card)       => invoke('add_card',      { card }),
   updateCard:   (id, card)   => invoke('update_card',   { id, card }),
   deleteCard:   (id)         => invoke('delete_card',   { id }),
   reviewCard:   (result)     => invoke('review_card',   { result }),
-  getStats:     ()           => invoke('get_stats'),
   resetCard:    (id)         => invoke('reset_card',    { id }),
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
   getSettings:  ()           => invoke('get_settings'),
@@ -164,14 +174,42 @@ function matchAccFilter(card, filter) {
 }
 
 // ── Refresh ──────────────────────────────────────────────────────────────────
+function localNowString() {
+  const d = new Date(), pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function computeDerived() {
+  const now = localNowString();
+  state.dueCards = state.cards.filter(c => c.next_review <= now);
+  const boxCounts = [0, 0, 0, 0, 0];
+  let totalReviews = 0, correctReviews = 0;
+  for (const c of state.cards) {
+    if (c.box_number >= 1 && c.box_number <= 5) boxCounts[c.box_number - 1]++;
+    totalReviews   += c.total_reviews   ?? 0;
+    correctReviews += c.correct_reviews ?? 0;
+  }
+  state.stats = {
+    total_cards:     state.cards.length,
+    box_counts:      boxCounts,
+    cards_due_today: state.dueCards.length,
+    total_reviews:   totalReviews,
+    correct_reviews: correctReviews,
+  };
+}
+
+// Full refresh: used only at boot (needs settings too)
 async function refresh() {
-  const [cards, due, stats, boxDays] = await Promise.all([
-    api.getAllCards(), api.getDueCards(), api.getStats(), api.getSettings(),
-  ]);
-  state.cards    = cards;
-  state.dueCards = due;
-  state.stats    = stats;
-  state.boxDays  = boxDays;
+  const [cards, boxDays] = await Promise.all([api.getAllCards(), api.getSettings()]);
+  state.cards   = cards;
+  state.boxDays = boxDays;
+  computeDerived();
+}
+
+// Card-only refresh: used after any card mutation (settings unchanged)
+async function refreshCards() {
+  state.cards = await api.getAllCards();
+  computeDerived();
 }
 
 // ── Render dispatcher ─────────────────────────────────────────────────────────
@@ -196,10 +234,10 @@ function render() {
   }
 
   // global modals
-  const existing = el('.modal-overlay');
-  if (existing) existing.remove();
-  const modal = renderImportHelpModal();
-  if (modal) document.body.appendChild(modal);
+  document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
+  [renderImportHelpModal(), renderConfirmModal(), renderImportConflictModal()]
+    .filter(Boolean)
+    .forEach(m => document.body.appendChild(m));
 }
 
 async function navigate(view) {
@@ -222,11 +260,11 @@ function renderDashboard() {
       ),
       h('div', { class: 'page-header-actions' },
         state.cards.length > 0
-          ? h('button', { class: 'btn-ghost', onClick: () => { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); navigate('practice-select'); } }, '◎ Practice')
+          ? h('button', { class: 'btn-ghost', onClick: () => { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); navigate('practice-select'); } }, icon('record-circle'), ' Practice')
           : null,
         due > 0
           ? h('button', { class: 'btn-primary', onClick: () => navigate('study') },
-              '◈', ` Study ${due} card${due !== 1 ? 's' : ''} due`)
+              icon('book'), ` Study ${due} card${due !== 1 ? 's' : ''} due`)
           : null,
       ),
     ),
@@ -293,7 +331,7 @@ function renderRecent() {
     return h('div', { class: 'section' },
       header,
       h('div', { class: 'empty' },
-        h('div', { class: 'empty-icon' }, '◧'),
+        h('div', { class: 'empty-icon' }, icon('inbox')),
         h('p',   { class: 'empty-title' }, 'No cards yet'),
         h('p',   { class: 'empty-sub'   }, 'Add your first flashcard to get started'),
         h('button', { class: 'btn-primary', onClick: () => { state.editCard = null; navigate('add'); } }, 'Create first card'),
@@ -308,7 +346,7 @@ function renderRecent() {
         h('div', { class: 'recent-item' },
           h('div', { class: 'recent-langs' },
             h('span', { class: 'recent-l1'  }, c.lang1),
-            h('span', { class: 'recent-arr' }, '→'),
+            h('span', { class: 'recent-arr' }, icon('arrow-right')),
             h('span', { class: 'recent-l2'  }, c.lang2),
           ),
           h('div', { class: 'recent-meta' },
@@ -323,10 +361,7 @@ function renderRecent() {
 
 // ── Study ─────────────────────────────────────────────────────────────────────
 function initStudy() {
-  const box1 = state.cards.filter(c => c.box_number === 1);
-  const box1Ids = new Set(box1.map(c => c.id));
-  const dueOther = state.dueCards.filter(c => c.box_number !== 1 && !box1Ids.has(c.id));
-  const cards = [...box1, ...dueOther];
+  const cards = state.dueCards;
   state.studyQueue = [
     ...cards.map(c => ({ ...c, reversed: false })),
     ...cards.map(c => ({ ...c, reversed: true  })),
@@ -353,7 +388,7 @@ function renderStudy() {
 
 function renderStudyEmpty() {
   return h('div', { class: 'study-done' },
-    h('div', { class: 'done-icon' }, '✦'),
+    h('div', { class: 'done-icon' }, icon('stars')),
     h('h2', {}, 'Nothing due right now'),
     h('p',  {}, 'All cards are scheduled for later. Check back soon!'),
     h('button', { class: 'btn-primary', onClick: () => navigate('dashboard') }, 'Back to Overview'),
@@ -367,7 +402,7 @@ function renderStudyDone() {
   const acc          = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
 
   return h('div', { class: 'study-done' },
-    h('div', { class: 'done-icon' }, '✦'),
+    h('div', { class: 'done-icon' }, icon('stars')),
     h('h2', {}, 'Session Complete!'),
     h('div', { class: 'done-stats' },
       doneStatEl(uniqueTotal,   'Reviewed'),
@@ -446,7 +481,7 @@ function renderStudyCard() {
   const wrap = h('div', { class: 'study-wrap' },
     // header
     h('div', { class: 'study-header' },
-      h('button', { class: 'back-btn', onClick: () => navigate('dashboard') }, '← Exit'),
+      h('button', { class: 'back-btn', onClick: () => navigate('dashboard') }, icon('arrow-left'), ' Exit'),
       h('div', { class: 'prog-wrap' },
         h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
         h('span', { class: 'prog-txt' }, `${doneCount} / ${uniqueTotal}`),
@@ -461,7 +496,7 @@ function renderStudyCard() {
     // direction badge
     h('div', { class: 'study-direction' },
       h('span', { class: `dir-badge${item.reversed ? ' dir-reverse' : ''}` },
-        item.reversed ? '↩ Recall the word' : '→ Recall the translation',
+        item.reversed ? h('span', {}, icon('arrow-return-left'), ' Recall the word') : h('span', {}, icon('arrow-right'), ' Recall the translation'),
       ),
     ),
 
@@ -488,7 +523,7 @@ function renderStudyCard() {
             render();
           }
         },
-      }, '← Back'),
+      }, icon('arrow-left'), ' Back'),
       h('button', {
         class: `nav-btn${state.studyIdx >= total - 1 ? ' disabled' : ''}`,
         onClick: () => {
@@ -498,7 +533,7 @@ function renderStudyCard() {
             render();
           }
         },
-      }, 'Next →'),
+      }, 'Next ', icon('arrow-right')),
     ),
 
     // meta bar
@@ -598,11 +633,11 @@ function buildAnswerSection(_card) {
 
   return h('div', { class: 'answer-btns' },
     h('button', { class: 'answer-btn wrong', onClick: () => doReview(false) },
-      h('span', { class: 'answer-icon' }, '✗'),
+      h('span', { class: 'answer-icon' }, icon('x-lg')),
       h('span', {}, 'Again'),
     ),
     h('button', { class: 'answer-btn correct', onClick: () => doReview(true) },
-      h('span', { class: 'answer-icon' }, '✓'),
+      h('span', { class: 'answer-icon' }, icon('check-lg')),
       h('span', {}, 'Got it'),
     ),
   );
@@ -656,11 +691,12 @@ async function batchApplyResults() {
     }
   }
   state.studyWrong = wrong;
-  await refresh();
+  await refreshCards();
 }
 
 // ── Library ────────────────────────────────────────────────────────────────────
 function getFiltered() {
+  const dueSet = state.libFilterDue ? new Set(state.dueCards.map(c => c.id)) : null;
   return state.cards.filter(c => {
     const q = state.libSearch.toLowerCase();
     const matchSearch = !q
@@ -671,7 +707,8 @@ function getFiltered() {
     const cardPos  = c.part_of_speech.split('/').map(p => p.trim());
     const matchPos = state.libFilterPos.size === 0 || cardPos.some(p => state.libFilterPos.has(p));
     const matchAcc = matchAccFilter(c, state.libFilterAcc);
-    return matchSearch && matchBox && matchPos && matchAcc;
+    const matchDue = !dueSet || dueSet.has(c.id);
+    return matchSearch && matchBox && matchPos && matchAcc && matchDue;
   });
 }
 
@@ -698,18 +735,17 @@ function renderLibrary() {
         h('button', { class: `btn-select${sel ? ' active' : ''}`, onClick: () => {
           state.libSelectMode = !sel;
           state.libSelected.clear();
-          state.libBatchConfirmDelete = false;
           render();
         }},
-          h('span', { class: 'select-icon' }, sel ? '✕' : '☐'),
+          h('span', { class: 'select-icon' }, sel ? icon('x-lg') : icon('square')),
           sel ? 'Cancel' : 'Select',
         ),
         filtered.length > 0
           ? h('button', { class: 'btn-ghost', onClick: () => exportCSV(filtered) },
-              state.libFilterBox.size === 1 ? `↓ Export Box ${[...state.libFilterBox][0]}` : '↓ Export CSV')
+              state.libFilterBox.size === 1 ? h('span', {}, icon('download'), ` Export Box ${[...state.libFilterBox][0]}`) : h('span', {}, icon('download'), ' Export CSV'))
           : null,
         h('div', { class: 'split-btn' },
-          h('button', { class: 'split-btn-main csv-import-btn', onClick: triggerImport }, '↑ Import CSV'),
+          h('button', { class: 'split-btn-main csv-import-btn', onClick: triggerImport }, icon('upload'), ' Import CSV'),
           h('button', { class: 'split-btn-help', onClick: () => { state.showImportHelp = true; render(); }, title: 'CSV format help' }, '?'),
         ),
         h('button', { class: 'btn-primary', onClick: () => { state.editCard = null; navigate('add'); } }, '+ New Card'),
@@ -733,7 +769,7 @@ function renderLibrary() {
           return inp;
         })(),
         state.libSearch
-          ? h('button', { class: 'search-clear', onClick: () => { state.libSearch = ''; resetPage(); render(); } }, '×')
+          ? h('button', { class: 'search-clear', onClick: () => { state.libSearch = ''; resetPage(); render(); } }, icon('x'))
           : null,
       ),
       // row 1: box filter (multi-select)
@@ -790,7 +826,7 @@ function renderLibrary() {
           ),
         ),
       ),
-      // row 3: accuracy filter
+      // row 3: accuracy filter + due today
       h('div', { class: 'filter-row' },
         h('span', { class: 'filter-label' }, 'Accuracy'),
         h('div', { class: 'filter-group' },
@@ -806,6 +842,11 @@ function renderLibrary() {
             return b;
           }),
         ),
+        (() => {
+          const b = h('button', { class: `filter-chip${state.libFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
+          b.addEventListener('click', () => { state.libFilterDue = !state.libFilterDue; resetPage(); render(); });
+          return b;
+        })(),
       ),
     ),
 
@@ -831,41 +872,35 @@ function renderLibrary() {
           // right: actions
           selCount > 0
             ? h('div', { class: 'batch-actions' },
-                !state.libBatchConfirmDelete
-                  ? h('div', { class: 'batch-move' },
-                      h('span', { class: 'batch-move-label' }, 'Move to'),
-                      h('div', { class: 'batch-move-boxes' },
-                        ...getBoxes().map(box => {
-                          const b = h('button', { class: 'batch-box-btn' }, String(box.box));
-                          b.style.setProperty('--box-clr', box.color);
-                          b.addEventListener('click', async () => {
-                            const ids = [...state.libSelected];
-                            await Promise.all(ids.map(id => api.moveCard(id, box.box)));
-                            state.libSelected.clear();
-                            await refresh(); render();
-                          });
-                          return b;
-                        }),
-                      ),
-                    )
-                  : null,
-                !state.libBatchConfirmDelete
-                  ? h('button', { class: 'batch-delete-btn', onClick: () => {
-                      state.libBatchConfirmDelete = true; render();
-                    }}, `✕ Delete (${selCount})`)
-                  : h('div', { class: 'batch-confirm' },
-                      h('span', { class: 'batch-confirm-msg' }, `Delete ${selCount} card${selCount !== 1 ? 's' : ''}?`),
-                      h('button', { class: 'batch-delete-btn', onClick: async () => {
-                        const ids = [...state.libSelected];
-                        await Promise.all(ids.map(id => api.deleteCard(id)));
-                        state.libSelected.clear();
-                        state.libBatchConfirmDelete = false;
-                        await refresh(); render();
-                      }}, 'Yes, delete'),
-                      h('button', { class: 'btn-ghost btn-sm', onClick: () => {
-                        state.libBatchConfirmDelete = false; render();
-                      }}, 'Cancel'),
+                h('div', { class: 'batch-move' },
+                    h('span', { class: 'batch-move-label' }, 'Move to'),
+                    h('div', { class: 'batch-move-boxes' },
+                      ...getBoxes().map(box => {
+                        const b = h('button', { class: 'batch-box-btn' }, String(box.box));
+                        b.style.setProperty('--box-clr', box.color);
+                        b.addEventListener('click', async () => {
+                          const ids = [...state.libSelected];
+                          await Promise.all(ids.map(id => api.moveCard(id, box.box)));
+                          state.libSelected.clear();
+                          await refreshCards(); render();
+                        });
+                        return b;
+                      }),
                     ),
+                  ),
+                h('button', { class: 'batch-delete-btn', onClick: () => {
+                  showConfirm(
+                    `Delete ${selCount} card${selCount !== 1 ? 's' : ''}?`,
+                    'This action cannot be undone.',
+                    'Yes, delete',
+                    async () => {
+                      const ids = [...state.libSelected];
+                      await Promise.all(ids.map(id => api.deleteCard(id)));
+                      state.libSelected.clear();
+                      await refreshCards(); render();
+                    }
+                  );
+                }}, icon('trash'), ` Delete (${selCount})`),
               )
             : null,
         )
@@ -878,13 +913,178 @@ function renderLibrary() {
           totalPages > 1
             ? h('div', { class: 'pagination' },
                 h('button', { class: 'btn-ghost', disabled: state.libPage === 0,
-                  onClick: () => { state.libPage--; render(); } }, '← Prev'),
+                  onClick: () => { state.libPage--; render(); } }, icon('arrow-left'), ' Prev'),
                 h('span', { class: 'page-info' }, `Page ${state.libPage + 1} of ${totalPages}`),
                 h('button', { class: 'btn-ghost', disabled: state.libPage >= totalPages - 1,
-                  onClick: () => { state.libPage++; render(); } }, 'Next →'),
+                  onClick: () => { state.libPage++; render(); } }, 'Next ', icon('arrow-right')),
               )
             : null,
         ),
+  );
+}
+
+// ── Confirm Modal ─────────────────────────────────────────────────────────────
+function showConfirm(title, detail, confirmLabel, onConfirm) {
+  state.confirmModal = { title, detail, confirmLabel, onConfirm };
+  render();
+}
+
+function renderConfirmModal() {
+  if (!state.confirmModal) return null;
+  const { title, detail, confirmLabel, onConfirm } = state.confirmModal;
+  function close() { state.confirmModal = null; render(); }
+  return h('div', { class: 'modal-overlay', onClick: close },
+    h('div', { class: 'modal confirm-modal', onClick: e => e.stopPropagation() },
+      h('div', { class: 'modal-header' },
+        h('h2', { class: 'modal-title' }, title),
+        h('button', { class: 'modal-close', onClick: close }, icon('x')),
+      ),
+      h('div', { class: 'modal-body' },
+        h('p', { class: 'confirm-detail' }, detail),
+        h('div', { class: 'confirm-actions' },
+          h('button', { class: 'btn-ghost', onClick: close }, 'Cancel'),
+          h('button', { class: 'btn-danger', onClick: async () => { close(); await onConfirm(); } }, confirmLabel),
+        ),
+      ),
+    ),
+  );
+}
+
+// ── Import Conflict Modal ──────────────────────────────────────────────────────
+function conflictRender() {
+  // Re-render while preserving the modal body scroll position
+  const body = document.querySelector('.conflict-modal .modal-body');
+  const top  = body ? body.scrollTop : 0;
+  render();
+  const newBody = document.querySelector('.conflict-modal .modal-body');
+  if (newBody) newBody.scrollTop = top;
+}
+
+function renderImportConflictModal() {
+  if (!state.importConflicts) return null;
+  const { newCards, conflicts } = state.importConflicts;
+  function close() { state.importConflicts = null; render(); }
+
+  async function applyImport() {
+    const conf = state.importConflicts;
+    state.importConflicts = null;
+    let imported = 0, skipped = 0;
+    for (const card of conf.newCards) {
+      try { await api.addCard(card); imported++; } catch { skipped++; }
+    }
+    for (const conflict of conf.conflicts) {
+      const hasChange = CONFLICT_FIELDS.some(f => {
+        const ev = (conflict.existing[f.key] ?? '').trim();
+        const iv = (conflict.incoming[f.key] ?? '').trim();
+        const c  = conflict.fieldChoices[f.key];
+        return ev !== iv && (c === 'incoming' || c === 'combine');
+      });
+      if (!hasChange) continue;
+      const merged = { lang1: conflict.existing.lang1 };
+      for (const f of CONFLICT_FIELDS) {
+        const ev = (conflict.existing[f.key] ?? '').trim();
+        const iv = (conflict.incoming[f.key] ?? '').trim();
+        const c  = conflict.fieldChoices[f.key];
+        merged[f.key] = c === 'incoming' ? iv
+                       : c === 'combine'  ? [ev, iv].filter(Boolean).join(', ')
+                       : ev;
+      }
+      try { await api.updateCard(conflict.existing.id, merged); imported++; } catch { skipped++; }
+    }
+    await refreshCards();
+    showToast(
+      imported > 0
+        ? `Imported ${imported} card${imported !== 1 ? 's' : ''}${skipped > 0 ? `, ${skipped} skipped` : ''}`
+        : 'No cards imported',
+      imported > 0 ? 'success' : 'error'
+    );
+    render();
+  }
+
+  return h('div', { class: 'modal-overlay' },
+    h('div', { class: 'modal conflict-modal', onClick: e => e.stopPropagation() },
+      h('div', { class: 'modal-header' },
+        h('h2', { class: 'modal-title' }, icon('exclamation-triangle'), ` ${conflicts.length} Duplicate Word${conflicts.length !== 1 ? 's' : ''} Found`),
+        h('button', { class: 'modal-close', onClick: close }, icon('x')),
+      ),
+      h('div', { class: 'modal-body' },
+        h('p', { class: 'conflict-note' },
+          `${newCards.length} new card${newCards.length !== 1 ? 's' : ''} will be imported. ` +
+          `Click a cell to choose which value to keep, or combine both with a comma:`
+        ),
+        h('div', { class: 'conflict-list' },
+          ...conflicts.map((conflict, i) => {
+            const { existing, incoming, fieldChoices } = conflict;
+
+            function setAll(source) {
+              CONFLICT_FIELDS.forEach(f => { state.importConflicts.conflicts[i].fieldChoices[f.key] = source; });
+              conflictRender();
+            }
+
+            function pick(fKey, source) {
+              state.importConflicts.conflicts[i].fieldChoices[fKey] = source;
+              conflictRender();
+            }
+
+            // Only show fields that actually differ
+            const diffFields = CONFLICT_FIELDS.filter(f =>
+              (existing[f.key] ?? '').trim() !== (incoming[f.key] ?? '').trim()
+            );
+
+            return h('div', { class: 'conflict-item' },
+              // ── Header ──
+              h('div', { class: 'conflict-item-header' },
+                h('span', { class: 'conflict-word-title' }, icon('card-text'), ` ${existing.lang1}`),
+                h('div', { class: 'conflict-quick' },
+                  h('button', { class: 'conflict-quick-btn', onClick: () => setAll('existing') }, 'Keep all existing'),
+                  h('button', { class: 'conflict-quick-btn', onClick: () => setAll('incoming') }, 'Use all imported'),
+                  h('button', { class: 'conflict-quick-btn', onClick: () => setAll('combine')  }, 'Combine all'),
+                ),
+              ),
+              diffFields.length === 0
+                ? h('div', { class: 'conflict-no-diff' }, icon('check-circle'), ' All fields are identical — no changes needed.')
+                : h('div', {},
+                    // ── Column headers ──
+                    h('div', { class: 'conflict-grid-header' },
+                      h('div', { class: 'conflict-grid-label' }),
+                      h('div', { class: 'conflict-col-head' }, icon('archive'),           ' Existing'),
+                      h('div', { class: 'conflict-col-head' }, icon('box-arrow-in-down'), ' Imported'),
+                      h('div', { class: 'conflict-col-head' }, icon('intersect'),         ' Combined'),
+                    ),
+                    // ── Field rows (differing fields only) ──
+                    h('div', { class: 'conflict-fields' },
+                      ...diffFields.map(f => {
+                        const ev     = (existing[f.key] ?? '').trim();
+                        const iv     = (incoming[f.key] ?? '').trim();
+                        const comb   = [ev, iv].filter(Boolean).join(', ');
+                        const chosen = fieldChoices[f.key];
+
+                        const cell = (val, source, extra) => h('div', {
+                          class: `conflict-val${chosen === source ? ' chosen' : ''}${extra ? ` ${extra}` : ''}`,
+                          onClick: () => pick(f.key, source),
+                        },
+                          h('span', { class: `conflict-val-text${!val ? ' conflict-empty' : ''}` }, val || '—'),
+                          chosen === source ? h('span', { class: 'conflict-check' }, icon('check-lg')) : null,
+                        );
+
+                        return h('div', { class: 'conflict-field-row' },
+                          h('div', { class: 'conflict-grid-label' }, f.label),
+                          cell(ev,   'existing'),
+                          cell(iv,   'incoming'),
+                          cell(comb, 'combine',  'conflict-val-combine'),
+                        );
+                      }),
+                    ),
+                  ),
+            );
+          }),
+        ),
+      ),
+      h('div', { class: 'modal-footer' },
+        h('button', { class: 'btn-ghost', onClick: close }, 'Cancel'),
+        h('button', { class: 'btn-primary', onClick: applyImport }, 'Apply'),
+      ),
+    ),
   );
 }
 
@@ -941,7 +1141,7 @@ function renderImportHelpModal() {
     h('div', { class: 'modal import-help-modal', onClick: e => e.stopPropagation() },
       h('div', { class: 'modal-header' },
         h('h2', { class: 'modal-title' }, 'CSV Import Format'),
-        h('button', { class: 'modal-close', onClick: close }, '×'),
+        h('button', { class: 'modal-close', onClick: close }, icon('x')),
       ),
       h('div', { class: 'modal-body' },
         h('p', { class: 'help-note' },
@@ -981,7 +1181,7 @@ function renderImportHelpModal() {
 function renderLibraryEmpty() {
   const noCards = state.cards.length === 0;
   return h('div', { class: 'empty' },
-    h('div', { class: 'empty-icon' }, '◧'),
+    h('div', { class: 'empty-icon' }, icon('inbox')),
     h('p', { class: 'empty-title' }, noCards ? 'No cards yet' : 'No matches'),
     h('p', { class: 'empty-sub'   }, noCards ? 'Add your first flashcard to get started' : 'Try adjusting your search or filters'),
     noCards
@@ -995,41 +1195,22 @@ function renderCardList(cards) {
     ...cards.map(card => {
       const isOpen    = state.libExpanded === card.id;
       const isChecked = state.libSelected.has(card.id);
+      const sel       = state.libSelectMode;
 
-      if (state.libSelectMode) {
-        const row = h('div', {
-          class: `card-row${isChecked ? ' selected' : ''}`,
-          onClick: () => {
+      const row = h('div', { class: `card-row${isOpen ? ' open' : ''}${isChecked ? ' selected' : ''}` },
+        h('div', { class: 'card-row-top', onClick: () => {
+          if (sel) {
             if (isChecked) state.libSelected.delete(card.id);
             else           state.libSelected.add(card.id);
-            render();
-          },
-        },
-          h('div', { class: 'card-row-top' },
-            h('div', { class: `practice-check${isChecked ? ' checked' : ''}` }, isChecked ? '✓' : ''),
-            h('div', { class: 'row-words' },
-              h('span', { class: 'row-l1'  }, card.lang1),
-              h('span', { class: 'row-sep' }, '→'),
-              h('span', { class: 'row-l2'  }, card.lang2),
-            ),
-            h('div', { class: 'row-chips' },
-              ...posChips(card.part_of_speech),
-              chip(card.usage_frequency),
-              boxChip(card.box_number),
-            ),
-          ),
-        );
-        return row;
-      }
-
-      const row = h('div', { class: `card-row${isOpen ? ' open' : ''}` },
-        h('div', { class: 'card-row-top', onClick: () => {
-          state.libExpanded = isOpen ? null : card.id;
+          } else {
+            state.libExpanded = isOpen ? null : card.id;
+          }
           render();
         }},
+          sel ? h('div', { class: `practice-check${isChecked ? ' checked' : ''}` }, isChecked ? icon('check-lg') : null) : null,
           h('div', { class: 'row-words' },
             h('span', { class: 'row-l1'  }, card.lang1),
-            h('span', { class: 'row-sep' }, '→'),
+            h('span', { class: 'row-sep' }, icon('arrow-right')),
             h('span', { class: 'row-l2'  }, card.lang2),
           ),
           h('div', { class: 'row-chips' },
@@ -1066,11 +1247,10 @@ function renderCardDetail(card) {
   );
 
   const nextDate = new Date(card.next_review).toLocaleDateString();
-  const confirmingDel = state.libConfirmDelete === card.id;
 
   return h('div', { class: 'card-detail' },
     ...sections,
-    h('div', { class: 'detail-meta' } ,
+    h('div', { class: 'detail-meta' },
       `Reviews: ${card.total_reviews} `,
       `Correct: ${card.correct_reviews} `,
       `Next review: ${nextDate} `,
@@ -1079,30 +1259,25 @@ function renderCardDetail(card) {
       h('button', { class: 'action-btn edit', onClick: () => {
         state.editCard = card;
         navigate('edit');
-      }}, '✎ Edit'),
+      }}, icon('pencil'), ' Edit'),
       h('button', { class: 'action-btn reset-btn', onClick: async () => {
         await api.resetCard(card.id);
-        await refresh();
+        await refreshCards();
         render();
       }}, '↺ Reset to Box 1'),
-      h('button', { class: `action-btn delete-btn${confirmingDel ? ' confirming' : ''}`, onClick: async () => {
-        if (confirmingDel) {
-          await api.deleteCard(card.id);
-          state.libConfirmDelete = null;
-          state.libExpanded      = null;
-          await refresh();
-          render();
-        } else {
-          state.libConfirmDelete = card.id;
-          render();
-          setTimeout(() => {
-            if (state.libConfirmDelete === card.id) {
-              state.libConfirmDelete = null;
-              render();
-            }
-          }, 3000);
-        }
-      }}, confirmingDel ? '⚠ Confirm delete?' : '✕ Delete'),
+      h('button', { class: 'action-btn delete-btn', onClick: () => {
+        showConfirm(
+          'Delete card?',
+          `"${card.lang1}" will be permanently removed.`,
+          'Delete',
+          async () => {
+            await api.deleteCard(card.id);
+            state.libExpanded = null;
+            await refreshCards();
+            render();
+          }
+        );
+      }}, icon('trash'), ' Delete'),
     ),
   );
 }
@@ -1199,7 +1374,7 @@ function renderForm() {
       } else {
         await api.addCard(payload);
       }
-      await refresh();
+      await refreshCards();
       state.editCard = null;
       navigate('library');
     } catch (err) {
@@ -1222,7 +1397,7 @@ function renderForm() {
         h('div', { class: 'form-sec-title' }, 'Word Pair'),
         h('div', { class: 'field-row' },
           fieldInput('lang1', 'e.g. ephemeral', true),
-          h('div', { class: 'field-arrow' }, '→'),
+          h('div', { class: 'field-arrow' }, icon('arrow-right')),
           fieldInput('lang2', 'e.g. 短暂的'),
         ),
         h('div', { class: 'field-row' },
@@ -1337,7 +1512,7 @@ async function exportCSV(cards = state.cards, boxNum = null) {
   const filename = `emo-flashcards${suffix}-${new Date().toISOString().slice(0,10)}.csv`;
   try {
     const savedPath = await invoke('save_csv', { csv: rows.join('\n'), filename });
-    showToast(`✓ Saved to ${savedPath}`, 'success');
+    showToast(`Saved to ${savedPath}`, 'success');
   } catch (err) {
     showToast(`Export failed: ${err}`, 'error');
   }
@@ -1399,22 +1574,46 @@ function parseCSV(text) {
     card.part_of_speech  = normalizePos(card.part_of_speech)   ?? 'noun';
     card.usage_frequency = normalizeFreq(card.usage_frequency) ?? 'common';
     const bn = parseInt(card.box_number, 10);
-    card.box_number = (!isNaN(bn) && bn >= 1 && bn <= 5) ? bn : undefined;
+    card.box_number = (!isNaN(bn) && bn >= 1 && bn <= 5) ? bn : 1;
     results.push(card);
   }
   return results;
 }
 
 async function importCSV(file) {
-  const text   = await file.text();
+  const text = await file.text();
   const parsed = parseCSV(text);
   if (parsed.length === 0) return { imported: 0, skipped: 0 };
-  let imported = 0, skipped = 0;
+
+  const existingLang1 = new Map(state.cards.map(c => [c.lang1.toLowerCase().trim(), c]));
+  const conflicts = [];
+  const newCards  = [];
+
   for (const card of parsed) {
+    const key = card.lang1.toLowerCase().trim();
+    if (existingLang1.has(key)) {
+      conflicts.push({
+        existing:     existingLang1.get(key),
+        incoming:     card,
+        fieldChoices: Object.fromEntries(CONFLICT_FIELDS.map(f => [f.key, 'existing'])),
+      });
+    } else {
+      newCards.push(card);
+    }
+  }
+  
+  if (conflicts.length > 0) {
+    state.importConflicts = { newCards, conflicts };
+    render();
+    return null;
+  }
+
+  let imported = 0, skipped = 0;
+  for (const card of newCards) {
     try { await api.addCard(card); imported++; }
     catch { skipped++; }
   }
-  await refresh();
+  await refreshCards();
   return { imported, skipped };
 }
 
@@ -1430,10 +1629,12 @@ function triggerImport() {
     if (!file) return;
     const btn = document.querySelector('.csv-import-btn');
     if (btn) { btn.textContent = 'Importing…'; btn.disabled = true; }
-    const { imported, skipped } = await importCSV(file);
+    const result = await importCSV(file);
+    if (result === null) { render(); return; }
+    const { imported, skipped } = result;
     showToast(
       imported > 0
-        ? `✓ Imported ${imported} card${imported !== 1 ? 's' : ''}${skipped > 0 ? `, ${skipped} skipped` : ''}`
+        ? `Imported ${imported} card${imported !== 1 ? 's' : ''}${skipped > 0 ? `, ${skipped} skipped` : ''}`
         : 'No valid cards found in file',
       imported > 0 ? 'success' : 'error'
     );
@@ -1444,6 +1645,7 @@ function triggerImport() {
 
 // ── Practice ──────────────────────────────────────────────────────────────────
 function renderPracticeSelect() {
+  const practiceDueSet = state.practiceFilterDue ? new Set(state.dueCards.map(c => c.id)) : null;
   const filtered = state.cards.filter(c => {
     const q = state.practiceSearch.toLowerCase();
     const matchSearch = !q
@@ -1454,7 +1656,8 @@ function renderPracticeSelect() {
     const cardPos  = c.part_of_speech.split('/').map(p => p.trim());
     const matchPos = state.practiceFilterPos.size === 0 || cardPos.some(p => state.practiceFilterPos.has(p));
     const matchAcc = matchAccFilter(c, state.practiceFilterAcc);
-    return matchSearch && matchBox && matchPos && matchAcc;
+    const matchDue = !practiceDueSet || practiceDueSet.has(c.id);
+    return matchSearch && matchBox && matchPos && matchAcc && matchDue;
   });
 
   function resetPracticePage() { state.practicePage = 0; }
@@ -1481,17 +1684,17 @@ function renderPracticeSelect() {
             h('button', {
               class: `mode-toggle-btn${state.practiceMode === 'flip' ? ' active' : ''}`,
               onClick: () => { state.practiceMode = 'flip'; render(); },
-            }, '◎ Flashcard'),
+            }, icon('record-circle'), ' Flashcard'),
             h('button', {
               class: `mode-toggle-btn${state.practiceMode === 'type' ? ' active' : ''}`,
               onClick: () => { state.practiceMode = 'type'; render(); },
-            }, '✎ Word'),
+            }, icon('pencil'), ' Word'),
           ),
           h('button', {
             class: 'btn-primary',
             disabled: selCount === 0,
             onClick: selCount > 0 ? startPractice : null,
-          }, `▶ Start${selCount > 0 ? ` (${selCount})` : ''}`),
+          }, icon('play-fill'), selCount > 0 ? ` Start (${selCount})` : ' Start'),
         ),
         h('div', { class: 'practice-header-row2' },
           h('button', { class: 'btn-ghost btn-sm', onClick: () => {
@@ -1522,7 +1725,7 @@ function renderPracticeSelect() {
                 state.practiceSelected = new Set(shuffled.map(c => c.id));
                 render();
               },
-            }, '⚄ Random'),
+            }, icon('shuffle'), ' Random'),
           ),
         ),
       ),
@@ -1543,7 +1746,7 @@ function renderPracticeSelect() {
           return inp;
         })(),
         state.practiceSearch
-          ? h('button', { class: 'search-clear', onClick: () => { state.practiceSearch = ''; render(); } }, '×')
+          ? h('button', { class: 'search-clear', onClick: () => { state.practiceSearch = ''; render(); } }, icon('x'))
           : null,
       ),
       h('div', { class: 'filter-row' },
@@ -1611,12 +1814,17 @@ function renderPracticeSelect() {
             return b;
           }),
         ),
+        (() => {
+          const b = h('button', { class: `filter-chip${state.practiceFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
+          b.addEventListener('click', () => { state.practiceFilterDue = !state.practiceFilterDue; render(); });
+          return b;
+        })(),
       ),
     ),
 
     filtered.length === 0
       ? h('div', { class: 'empty' },
-          h('div', { class: 'empty-icon' }, '◧'),
+          h('div', { class: 'empty-icon' }, icon('inbox')),
           h('p', { class: 'empty-title' }, state.cards.length === 0 ? 'No cards yet' : 'No matches'),
           h('p', { class: 'empty-sub' }, state.cards.length === 0 ? 'Add some cards first' : 'Try adjusting your filters'),
         )
@@ -1632,10 +1840,10 @@ function renderPracticeSelect() {
                 render();
               },
             },
-              h('div', { class: `practice-check${checked ? ' checked' : ''}` }, checked ? '✓' : ''),
+              h('div', { class: `practice-check${checked ? ' checked' : ''}` }, checked ? icon('check-lg') : null),
               h('div', { class: 'row-words' },
                 h('span', { class: 'row-l1' }, card.lang1),
-                h('span', { class: 'row-sep' }, '→'),
+                h('span', { class: 'row-sep' }, icon('arrow-right')),
                 h('span', { class: 'row-l2' }, card.lang2),
               ),
               h('div', { class: 'row-chips' },
@@ -1651,10 +1859,10 @@ function renderPracticeSelect() {
           totalPages > 1
             ? h('div', { class: 'pagination' },
                 h('button', { class: 'btn-ghost', disabled: state.practicePage === 0,
-                  onClick: () => { state.practicePage--; render(); } }, '← Prev'),
+                  onClick: () => { state.practicePage--; render(); } }, icon('arrow-left'), ' Prev'),
                 h('span', { class: 'page-info' }, `Page ${state.practicePage + 1} of ${totalPages}`),
                 h('button', { class: 'btn-ghost', disabled: state.practicePage >= totalPages - 1,
-                  onClick: () => { state.practicePage++; render(); } }, 'Next →'),
+                  onClick: () => { state.practicePage++; render(); } }, 'Next ', icon('arrow-right')),
               )
             : null,
         ),
@@ -1700,7 +1908,7 @@ function renderPracticeDone() {
   const acc = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
 
   return h('div', { class: 'study-done' },
-    h('div', { class: 'done-icon' }, '✦'),
+    h('div', { class: 'done-icon' }, icon('stars')),
     h('h2', {}, 'Practice Complete!'),
     h('div', { class: 'done-stats' },
       doneStatEl(uniqueTotal,   'Reviewed'),
@@ -1708,7 +1916,7 @@ function renderPracticeDone() {
       doneStatEl(`${acc}%`,     'Accuracy'),
     ),
     h('div', { class: 'done-actions' },
-      h('button', { class: 'btn-ghost', onClick: () => navigate('practice-select') }, '← Back to selection'),
+      h('button', { class: 'btn-ghost', onClick: () => navigate('practice-select') }, icon('arrow-left'), ' Back to selection'),
       h('button', { class: 'btn-primary', onClick: () => {
         state.practiceQueue     = [...state.practiceQueue].sort(() => Math.random() - 0.5);
         state.practiceIdx       = 0;
@@ -1736,7 +1944,7 @@ function renderPracticeCard() {
 
   return h('div', { class: 'study-wrap' },
     h('div', { class: 'study-header' },
-      h('button', { class: 'back-btn', onClick: () => navigate('practice-select') }, '← Exit'),
+      h('button', { class: 'back-btn', onClick: () => navigate('practice-select') }, icon('arrow-left'), ' Exit'),
       h('div', { class: 'prog-wrap' },
         h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
         h('span', { class: 'prog-txt' }, `${doneCount} / ${uniqueTotal}`),
@@ -1750,7 +1958,7 @@ function renderPracticeCard() {
 
     h('div', { class: 'study-direction' },
       h('span', { class: `dir-badge${card.reversed ? ' dir-reverse' : ''}` },
-        card.reversed ? '↩ Recall the word' : '→ Recall the translation',
+        card.reversed ? h('span', {}, icon('arrow-return-left'), ' Recall the word') : h('span', {}, icon('arrow-right'), ' Recall the translation'),
       ),
     ),
 
@@ -1774,7 +1982,7 @@ function renderPracticeCard() {
             render();
           }
         },
-      }, '← Back'),
+      }, icon('arrow-left'), ' Back'),
       h('button', {
         class: `nav-btn${state.practiceIdx >= total - 1 ? ' disabled' : ''}`,
         onClick: () => {
@@ -1784,7 +1992,7 @@ function renderPracticeCard() {
             render();
           }
         },
-      }, 'Next →'),
+      }, 'Next ', icon('arrow-right')),
     ),
 
     (() => {
@@ -1857,11 +2065,11 @@ function buildPracticeAnswerSection() {
   if (!state.practiceFlipped) return h('span', {});
   return h('div', { class: 'answer-btns' },
     h('button', { class: 'answer-btn wrong',   onClick: () => doPractice(false) },
-      h('span', { class: 'answer-icon' }, '✗'),
+      h('span', { class: 'answer-icon' }, icon('x-lg')),
       h('span', {}, 'Again'),
     ),
     h('button', { class: 'answer-btn correct', onClick: () => doPractice(true) },
-      h('span', { class: 'answer-icon' }, '✓'),
+      h('span', { class: 'answer-icon' }, icon('check-lg')),
       h('span', {}, 'Got it'),
     ),
   );
@@ -1943,7 +2151,7 @@ function renderPracticeTypeCard() {
 
   return h('div', { class: 'study-wrap' },
     h('div', { class: 'study-header' },
-      h('button', { class: 'back-btn', onClick: () => navigate('practice-select') }, '← Exit'),
+      h('button', { class: 'back-btn', onClick: () => navigate('practice-select') }, icon('arrow-left'), ' Exit'),
       h('div', { class: 'prog-wrap' },
         h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
         h('span', { class: 'prog-txt' }, `${state.practiceIdx + 1} / ${total}`),
@@ -1975,10 +2183,10 @@ function renderPracticeTypeCard() {
         result !== null
           ? h('div', { class: `type-result ${result}` },
               result === 'correct'
-                ? h('span', {}, '✓ Correct!')
-                : h('span', {}, `✗ Answer: ${card.lang1}`),
+                ? h('span', {}, icon('check-lg'), ' Correct!')
+                : h('span', {}, icon('x-lg'), ` Answer: ${card.lang1}`),
               h('button', { class: 'btn-primary', style: { marginLeft: '12px' }, onClick: advance },
-                state.practiceIdx + 1 >= total ? 'Finish' : 'Next →'),
+                state.practiceIdx + 1 >= total ? 'Finish' : h('span', {}, 'Next ', icon('arrow-right'))),
             )
           : null,
       ),
@@ -2038,7 +2246,7 @@ function renderSettings() {
     try {
       await api.saveSettings(draft);
       state.boxDays = [...draft];
-      showToast('✓ Settings saved', 'success');
+      showToast('Settings saved', 'success');
       render();
     } catch (err) {
       showToast(`Error: ${err}`, 'error');
@@ -2107,16 +2315,16 @@ function renderSettings() {
 // ── Sidebar ────────────────────────────────────────────────────────────────────
 function buildSidebar() {
   const navItems = [
-    { view: 'dashboard',       label: 'Overview', icon: '⬡' },
-    { view: 'study',           label: 'Study',    icon: '◈', badge: true },
-    { view: 'practice-select', label: 'Practice', icon: '◎' },
-    { view: 'library',         label: 'Library',  icon: '▦' },
-    { view: 'settings',        label: 'Settings', icon: '⚙' },
+    { view: 'dashboard',       label: 'Overview', icon: 'house'          },
+    { view: 'study',           label: 'Study',    icon: 'book',   badge: true },
+    { view: 'practice-select', label: 'Practice', icon: 'record-circle'  },
+    { view: 'library',         label: 'Library',  icon: 'collection'     },
+    { view: 'settings',        label: 'Settings', icon: 'gear'           },
   ];
 
   const sidebar = h('aside', { class: 'sidebar' },
     h('div', { class: 'brand' },
-      h('span', { class: 'brand-icon' }, '⬡'),
+      h('i', { class: 'brand-icon bi bi-hexagon' }),
       h('div', {},
         h('span', { class: 'brand-name' }, 'EMO'),
         h('span', { class: 'brand-sub'  }, '5-Box System'),
@@ -2135,7 +2343,7 @@ function buildSidebar() {
           navigate(item.view);
         },
       },
-        h('span', { class: 'nav-icon' }, item.icon),
+        h('i', { class: `nav-icon bi bi-${item.icon}` }),
         h('span', {}, item.label),
         item.badge && state.dueCards.length > 0
           ? h('span', { class: 'nav-badge' }, String(state.dueCards.length))
