@@ -137,12 +137,25 @@ function el(selector) { return document.querySelector(selector); }
 
 function boxColor(n) { return getBoxes()[n - 1]?.color ?? '#c8a96e'; }
 
-function chip(text, extra = '') {
-  return h('span', { class: `chip ${extra}` }, text);
-}
+const POS_CLR  = { noun:'#5db8e8', verb:'#e8c85d', adjective:'#6dd68a', adverb:'#c8a96e', idiom:'#e85d5d' };
+const FREQ_CLR = { 'very common':'#6dd68a', 'common':'#5db8e8', 'uncommon':'#e8c85d', 'rare':'#c8a96e', 'archaic':'#e85d5d' };
 
 function posChips(pos) {
-  return (pos || 'noun').split('/').map(p => chip(p.trim()));
+  return (pos || 'noun').split('/').map(p => {
+    const t = p.trim();
+    const clr = POS_CLR[t];
+    const c = h('span', { class: `chip${clr ? ' chip-tag' : ''}` }, t);
+    if (clr) c.style.setProperty('--tag-clr', clr);
+    return c;
+  });
+}
+
+function freqChip(freq) {
+  if (!freq) return null;
+  const clr = FREQ_CLR[freq];
+  const c = h('span', { class: `chip${clr ? ' chip-tag' : ''}` }, freq);
+  if (clr) c.style.setProperty('--tag-clr', clr);
+  return c;
 }
 
 function boxChip(n) {
@@ -341,21 +354,7 @@ function renderRecent() {
 
   return h('div', { class: 'section' },
     header,
-    h('div', { class: 'recent-list' },
-      ...recent.map(c =>
-        h('div', { class: 'recent-item' },
-          h('div', { class: 'recent-langs' },
-            h('span', { class: 'recent-l1'  }, c.lang1),
-            h('span', { class: 'recent-arr' }, icon('arrow-right')),
-            h('span', { class: 'recent-l2'  }, c.lang2),
-          ),
-          h('div', { class: 'recent-meta' },
-            ...posChips(c.part_of_speech),
-            boxChip(c.box_number),
-          ),
-        ),
-      ),
-    ),
+    renderCardList(recent),
   );
 }
 
@@ -1215,7 +1214,7 @@ function renderCardList(cards) {
           ),
           h('div', { class: 'row-chips' },
             ...posChips(card.part_of_speech),
-            chip(card.usage_frequency),
+            freqChip(card.usage_frequency),
             boxChip(card.box_number),
             accChip(card),
           ),
@@ -1848,7 +1847,7 @@ function renderPracticeSelect() {
               ),
               h('div', { class: 'row-chips' },
                 ...posChips(card.part_of_speech),
-                chip(card.usage_frequency),
+                freqChip(card.usage_frequency),
                 boxChip(card.box_number),
                 accChip(card),
               ),

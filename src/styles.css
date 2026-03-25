@@ -108,6 +108,7 @@ input,select,textarea { font-family:inherit; }
 
 /* ── Chips ─────────────────────────────────────────────── */
 .chip { font-size:10.5px; padding:2px 8px; border-radius:99px; background:var(--bg-3); color:var(--text-2); border:1px solid var(--border); text-transform:capitalize; white-space:nowrap; }
+.chip-tag { background:color-mix(in srgb,var(--tag-clr) 13%,transparent); color:var(--tag-clr); border-color:color-mix(in srgb,var(--tag-clr) 28%,transparent); }
 .chip-box { font-family:var(--font-m); background:color-mix(in srgb,var(--box-clr,var(--accent)) 15%,transparent); color:var(--box-clr,var(--accent)); border-color:color-mix(in srgb,var(--box-clr,var(--accent)) 30%,transparent); }
 .chip-acc { font-family:var(--font-m); background:rgba(109,214,138,.1); color:var(--green); border-color:rgba(109,214,138,.25); }
 
