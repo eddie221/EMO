@@ -1,12 +1,45 @@
 use chrono::{Duration, Local, NaiveTime, TimeZone};
+use log::{debug, error, info, warn};
 use rusqlite::params;
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 use uuid::Uuid;
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
+use std::sync::{mpsc, Mutex};
 
 use crate::db::DbState;
 use crate::helpers::{next_review_date, parse_box_days, row_to_card, SELECT_ALL};
-use crate::models::{CreateFlashcard, Flashcard, ReviewResult, Stats};
+use crate::models::{CreateFlashcard, EvalResult, Flashcard, ReviewResult, Stats};
+
+// ── Meaning eval process state ────────────────────────────────────────────────
+//
+// Ollama-style channel pattern:
+//   - A dedicated I/O thread owns all process stdin/stdout handles.
+//   - The shared state holds only a SyncSender, so the Mutex is released in
+//     microseconds rather than held across blocking I/O.
+//   - start_meaning_eval returns immediately; the frontend learns readiness via
+//     "eval-ready" / "eval-error" events.
+
+struct EvalRequest {
+    word: String,
+    description: String,
+    user_answer: String,
+    resp_tx: mpsc::SyncSender<Result<EvalResult, String>>,
+}
+
+pub struct EvalHandle {
+    req_tx: mpsc::SyncSender<EvalRequest>,
+}
+
+pub enum EvalStateInner {
+    Idle,
+    Loading,
+    Ready(EvalHandle),
+    Failed(String),
+}
+
+pub struct MeaningEvalState(pub Mutex<EvalStateInner>);
 
 // ── Settings helpers ─────────────────────────────────────────────────────────
 
@@ -284,4 +317,412 @@ pub fn save_csv(csv: String, filename: String) -> Result<String, String> {
     let path = dir.join(&filename);
     fs::write(&path, csv).map_err(|e| e.to_string())?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// ── Meaning mode: Python env + eval process ───────────────────────────────────
+
+const MEANING_EVAL_PY: &str  = include_str!("../python/meaning_eval.py");
+const REQUIREMENTS_TXT: &str = include_str!("../python/requirements.txt");
+
+fn emo_data_dir() -> std::path::PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("EMO")
+}
+
+fn python_bin(venv: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(target_os = "windows") {
+        venv.join("Scripts").join("python.exe")
+    } else {
+        venv.join("bin").join("python3")
+    }
+}
+
+/// Finds a working python3 executable.
+/// GUI apps on macOS/Linux don't inherit the shell PATH, so $PATH-based lookup
+/// misses Homebrew (/opt/homebrew/bin, /usr/local/bin) and pyenv installs.
+fn find_python3() -> Result<std::path::PathBuf, String> {
+    let candidates: &[&str] = if cfg!(target_os = "windows") {
+        &["python", "python3"]
+    } else {
+        &[
+            "/opt/homebrew/bin/python3",   // Apple Silicon Homebrew
+            "/usr/local/bin/python3",       // Intel Homebrew / common Linux
+            "/usr/bin/python3",             // system Python
+            "python3",                      // fallback: whatever is in PATH
+        ]
+    };
+
+    for candidate in candidates {
+        let path = std::path::PathBuf::from(candidate);
+        let ok = Command::new(&path)
+            .args(["--version"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            info!("find_python3: found {}", path.display());
+            return Ok(path);
+        }
+        debug!("find_python3: not found at {candidate}");
+    }
+    error!("find_python3: python3 not found in any candidate location");
+    Err("python3 not found. Please install Python 3 and try again.".into())
+}
+
+/// Returns true if the EMO venv exists and the transformers package is present.
+/// Uses filesystem checks only — no subprocess spawning — so it returns instantly.
+#[tauri::command]
+pub fn check_python_env() -> bool {
+    let venv = emo_data_dir().join("EMO");
+    if !python_bin(&venv).exists() {
+        info!("check_python_env: venv python binary not found at {}", python_bin(&venv).display());
+        return false;
+    }
+
+    // Locate site-packages and check for the transformers directory
+    let site_packages = if cfg!(target_os = "windows") {
+        venv.join("Lib").join("site-packages")
+    } else {
+        // lib/pythonX.Y/site-packages — glob the pythonX.Y dir
+        let lib = venv.join("lib");
+        match fs::read_dir(&lib).ok().and_then(|mut d| d.find_map(|e| e.ok())) {
+            Some(entry) => entry.path().join("site-packages"),
+            None => {
+                warn!("check_python_env: could not read venv/lib directory");
+                return false;
+            }
+        }
+    };
+
+    let ready = site_packages.join("transformers").is_dir();
+    info!("check_python_env: transformers present = {ready}");
+    ready
+}
+
+/// Streams stdout and stderr from a child process concurrently, emitting each line
+/// as a "setup-log" event. stderr is drained in a background thread so neither
+/// pipe stalls waiting for the other to be read.
+fn stream_child(proc: &mut std::process::Child, app: &tauri::AppHandle) {
+    let stderr = proc.stderr.take().map(BufReader::new);
+    let app2 = app.clone();
+    let stderr_thread = stderr.map(|reader| {
+        std::thread::spawn(move || {
+            for line in reader.lines().flatten() {
+                debug!("setup stderr: {line}");
+                app2.emit("setup-log", line).ok();
+            }
+        })
+    });
+
+    if let Some(stdout) = proc.stdout.take() {
+        for line in BufReader::new(stdout).lines().flatten() {
+            debug!("setup stdout: {line}");
+            app.emit("setup-log", line).ok();
+        }
+    }
+
+    if let Some(t) = stderr_thread {
+        t.join().ok();
+    }
+}
+
+fn run_setup(app: &tauri::AppHandle) -> Result<(), String> {
+    let emit = |msg: &str| { app.emit("setup-log", msg.to_string()).ok(); };
+
+    let data = emo_data_dir();
+    info!("run_setup: data dir = {}", data.display());
+    fs::create_dir_all(&data).map_err(|e| e.to_string())?;
+
+    let py_dir = data.join("python");
+    fs::create_dir_all(&py_dir).map_err(|e| e.to_string())?;
+    fs::write(py_dir.join("meaning_eval.py"),  MEANING_EVAL_PY).map_err(|e| e.to_string())?;
+    fs::write(py_dir.join("requirements.txt"), REQUIREMENTS_TXT).map_err(|e| e.to_string())?;
+
+    let venv = data.join("EMO");
+
+    // 1. Create venv (skip if already exists)
+    if !python_bin(&venv).exists() {
+        emit("[1/3] Creating virtual environment 'EMO'…");
+        let python3 = find_python3()?;
+        emit(&format!("Using {}", python3.display()));
+        info!("run_setup: creating venv at {} using {}", venv.display(), python3.display());
+        let out = Command::new(&python3)
+            .args(["-m", "venv", venv.to_str().unwrap()])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            let msg = String::from_utf8_lossy(&out.stderr).into_owned();
+            error!("run_setup: venv creation failed: {msg}");
+            emit(&format!("Error: {msg}"));
+            return Err(msg);
+        }
+        info!("run_setup: venv created");
+        emit("Virtual environment created.");
+    } else {
+        info!("run_setup: venv already exists, skipping creation");
+    }
+
+    let python = python_bin(&venv);
+    let pip = if cfg!(target_os = "windows") {
+        venv.join("Scripts").join("pip.exe")
+    } else {
+        venv.join("bin").join("pip3")
+    };
+
+    // 2. Install requirements — stream stdout + stderr concurrently
+    emit("[2/3] Installing Python packages…");
+    info!("run_setup: running pip install from {}", pip.display());
+    let mut proc = Command::new(&pip)
+        .args([
+            "install",
+            "--progress-bar", "on",
+            "-r", py_dir.join("requirements.txt").to_str().unwrap(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    stream_child(&mut proc, app);
+
+    let pip_status = proc.wait().map_err(|e| e.to_string())?;
+    if !pip_status.success() {
+        error!("run_setup: pip install failed with exit code {:?}", pip_status.code());
+        return Err("pip install failed".into());
+    }
+    info!("run_setup: pip install succeeded");
+
+    // 3. Pre-download the model weights — stream stdout + stderr concurrently
+    emit("[3/3] Downloading Qwen/Qwen3-VL-2B-Instruct…");
+    info!("run_setup: starting model download");
+    let dl_script = "\
+import sys
+from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+print('Downloading processor…', flush=True)
+AutoProcessor.from_pretrained('Qwen/Qwen3-VL-2B-Instruct')
+print('Downloading model weights…', flush=True)
+Qwen3VLForConditionalGeneration.from_pretrained('Qwen/Qwen3-VL-2B-Instruct')
+print('Download complete.', flush=True)
+";
+
+    let mut proc = Command::new(&python)
+        .args(["-u", "-c", dl_script])
+        .env("PYTHONUNBUFFERED", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    stream_child(&mut proc, app);
+
+    let dl_status = proc.wait().map_err(|e| e.to_string())?;
+    if !dl_status.success() {
+        error!("run_setup: model download failed with exit code {:?}", dl_status.code());
+        return Err("Model download failed".into());
+    }
+    info!("run_setup: model download succeeded");
+
+    emit("Setup complete!");
+    Ok(())
+}
+
+/// Starts the setup in a background thread and returns immediately.
+/// Listen for "setup-log" events for progress, "setup-done" on success,
+/// and "setup-error" on failure.
+#[tauri::command]
+pub fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
+    info!("setup_python_env: spawning setup thread");
+    std::thread::spawn(move || {
+        match run_setup(&app) {
+            Ok(()) => {
+                info!("setup_python_env: setup completed successfully");
+                app.emit("setup-done", ()).ok();
+            }
+            Err(e) => {
+                error!("setup_python_env: setup failed: {e}");
+                app.emit("setup-error", e).ok();
+            }
+        }
+    });
+    Ok(())
+}
+
+/// Spawns the Python process and an I/O handler thread.
+/// Returns an EvalHandle (channel sender) once "ready" is received, or an error.
+fn spawn_eval_process(app: &tauri::AppHandle) -> Result<EvalHandle, String> {
+    let data   = emo_data_dir();
+    let venv   = data.join("EMO");
+    let python = python_bin(&venv);
+    let script = data.join("python").join("meaning_eval.py");
+
+    info!("spawn_eval_process: starting {} {}", python.display(), script.display());
+
+    let mut child = Command::new(&python)
+        .arg(&script)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start eval process: {e}"))?;
+
+    info!("spawn_eval_process: process spawned (pid {:?})", child.id());
+
+    let mut stdin  = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let stderr     = child.stderr.take().unwrap();
+
+    // Drain stderr in a background thread and forward lines as events.
+    let app_err = app.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().flatten() {
+            debug!("eval stderr: {line}");
+            app_err.emit("eval-log", format!("[stderr] {line}")).ok();
+        }
+    });
+
+    // Block *this* (background) thread until Python signals ready.
+    info!("spawn_eval_process: waiting for ready signal…");
+    let mut line = String::new();
+    stdout.read_line(&mut line).map_err(|e| e.to_string())?;
+    if line.is_empty() {
+        error!("spawn_eval_process: process exited before signaling ready");
+        return Err("Python process exited before signaling ready".into());
+    }
+    let val: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|_| format!("Invalid ready signal: {}", line.trim()))?;
+    if let Some(err) = val.get("error") {
+        let msg = err.as_str().unwrap_or("unknown error").to_string();
+        error!("spawn_eval_process: model load error: {msg}");
+        return Err(msg);
+    }
+    info!("spawn_eval_process: model ready");
+
+    // Hand off all I/O to a dedicated thread. The mutex is never held across I/O.
+    let (req_tx, req_rx) = mpsc::sync_channel::<EvalRequest>(1);
+    std::thread::spawn(move || {
+        for req in req_rx {
+            debug!("eval_io_thread: evaluating word={:?}", req.word);
+            let result = (|| -> Result<EvalResult, String> {
+                let json = serde_json::json!({
+                    "word": req.word,
+                    "description": req.description,
+                    "user_answer": req.user_answer,
+                });
+                writeln!(stdin, "{json}").map_err(|e| e.to_string())?;
+                stdin.flush().map_err(|e| e.to_string())?;
+
+                let mut response = String::new();
+                stdout.read_line(&mut response).map_err(|e| e.to_string())?;
+                if response.is_empty() {
+                    error!("eval_io_thread: Python process closed unexpectedly");
+                    return Err("Python process closed unexpectedly".into());
+                }
+
+                let val: serde_json::Value = serde_json::from_str(response.trim())
+                    .map_err(|e| e.to_string())?;
+                if let Some(err) = val.get("error") {
+                    let msg = err.as_str().unwrap_or("eval error").to_string();
+                    error!("eval_io_thread: eval error from Python: {msg}");
+                    return Err(msg);
+                }
+                let result = EvalResult {
+                    correct:  val["correct"].as_bool().unwrap_or(false),
+                    feedback: val["feedback"].as_str().unwrap_or("").to_string(),
+                };
+                debug!("eval_io_thread: result correct={}", result.correct);
+                Ok(result)
+            })();
+            req.resp_tx.send(result).ok();
+        }
+        info!("eval_io_thread: channel closed, killing process");
+        child.kill().ok();
+    });
+
+    Ok(EvalHandle { req_tx })
+}
+
+/// Starts the Python eval process in the background.
+/// Returns immediately; listen for "eval-ready" / "eval-error" events on the window.
+#[tauri::command]
+pub fn start_meaning_eval(app: tauri::AppHandle) -> Result<(), String> {
+    {
+        let state = app.state::<MeaningEvalState>();
+        let mut lock = state.0.lock().map_err(|e| e.to_string())?;
+        match &*lock {
+            EvalStateInner::Loading | EvalStateInner::Ready(_) => {
+                info!("start_meaning_eval: already loading or ready, skipping");
+                return Ok(());
+            }
+            _ => {}
+        }
+        info!("start_meaning_eval: beginning model load");
+        *lock = EvalStateInner::Loading;
+    } // mutex released before spawning
+
+    std::thread::spawn(move || {
+        let state = app.state::<MeaningEvalState>();
+        match spawn_eval_process(&app) {
+            Ok(handle) => {
+                info!("start_meaning_eval: model ready, updating state");
+                *state.0.lock().unwrap() = EvalStateInner::Ready(handle);
+                app.emit("eval-ready", ()).ok();
+            }
+            Err(e) => {
+                error!("start_meaning_eval: failed to load model: {e}");
+                *state.0.lock().unwrap() = EvalStateInner::Failed(e.clone());
+                app.emit("eval-error", e).ok();
+            }
+        }
+    });
+
+    Ok(())
+}
+
+/// Sends a request to the Python process. Does not hold the mutex during inference.
+#[tauri::command]
+pub fn evaluate_meaning(
+    state: State<MeaningEvalState>,
+    word: String,
+    description: String,
+    user_answer: String,
+) -> Result<EvalResult, String> {
+    debug!("evaluate_meaning: word={word:?}");
+    // Hold mutex only long enough to clone the sender.
+    let req_tx = {
+        let lock = state.0.lock().map_err(|e| e.to_string())?;
+        match &*lock {
+            EvalStateInner::Ready(h)  => h.req_tx.clone(),
+            EvalStateInner::Loading   => {
+                warn!("evaluate_meaning: called while model still loading");
+                return Err("Model is still loading".into());
+            }
+            EvalStateInner::Failed(e) => {
+                error!("evaluate_meaning: called but model failed: {e}");
+                return Err(e.clone());
+            }
+            EvalStateInner::Idle => {
+                warn!("evaluate_meaning: called before start_meaning_eval");
+                return Err("Eval process not started".into());
+            }
+        }
+    };
+
+    let (resp_tx, resp_rx) = mpsc::sync_channel(1);
+    req_tx.send(EvalRequest { word, description, user_answer, resp_tx })
+        .map_err(|_| "Eval process is not available".to_string())?;
+    let result = resp_rx.recv().map_err(|_| "Eval process closed unexpectedly".to_string())?;
+    if let Ok(ref r) = result {
+        debug!("evaluate_meaning: result correct={}", r.correct);
+    }
+    result
+}
+
+/// Stops the Python eval process by dropping the channel (I/O thread kills the child).
+#[tauri::command]
+pub fn stop_meaning_eval(state: State<MeaningEvalState>) -> Result<(), String> {
+    info!("stop_meaning_eval: stopping eval process");
+    let mut lock = state.0.lock().map_err(|e| e.to_string())?;
+    *lock = EvalStateInner::Idle;
+    Ok(())
 }

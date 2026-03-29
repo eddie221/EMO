@@ -396,6 +396,34 @@ input,select,textarea { font-family:inherit; }
 .type-result.correct { color:var(--green); }
 .type-result.wrong   { color:var(--red); }
 
+/* ── Meaning mode ──────────────────────────────────────── */
+.meaning-loading { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; padding:80px 24px; color:var(--text-2); font-size:14px; }
+.meaning-spinner { width:32px; height:32px; border:3px solid var(--border-2); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+.meaning-spinner-sm { display:inline-block; width:14px; height:14px; border:2px solid var(--border-2); border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.meaning-eval-row { display:flex; align-items:center; gap:8px; color:var(--text-2); font-size:13px; margin-top:8px; }
+.meaning-error { color:var(--red); font-size:13px; display:flex; align-items:center; gap:6px; }
+.meaning-prompt { font-size:13px; color:var(--text-2); margin:8px 0 4px; }
+.meaning-input { width:100%; background:var(--bg-3); border:1.5px solid var(--border-2); border-radius:var(--r); padding:10px 14px; color:var(--text); font-size:14px; font-family:inherit; outline:none; resize:vertical; transition:border-color var(--ease); line-height:1.6; }
+.meaning-input:focus { border-color:var(--accent); }
+.meaning-input.correct { border-color:var(--green); background:color-mix(in srgb,var(--green) 8%,var(--bg-3)); }
+.meaning-input.wrong   { border-color:var(--red);   background:color-mix(in srgb,var(--red)   8%,var(--bg-3)); }
+.meaning-hint { font-size:11px; color:var(--text-3); }
+.meaning-actions { display:flex; align-items:center; gap:10px; margin-top:10px; }
+.meaning-result { margin-top:14px; padding:14px 16px; border-radius:var(--r); border:1px solid; display:flex; flex-direction:column; gap:8px; }
+.meaning-result.correct { border-color:color-mix(in srgb,var(--green) 35%,transparent); background:color-mix(in srgb,var(--green) 8%,transparent); }
+.meaning-result.wrong   { border-color:color-mix(in srgb,var(--red)   35%,transparent); background:color-mix(in srgb,var(--red)   8%,transparent); }
+.meaning-result-verdict { font-size:15px; font-weight:600; display:flex; align-items:center; gap:6px; }
+.meaning-result.correct .meaning-result-verdict { color:var(--green); }
+.meaning-result.wrong   .meaning-result-verdict { color:var(--red); }
+.meaning-result-ref { font-size:13px; color:var(--text-2); }
+.meaning-feedback { font-size:13px; color:var(--text); line-height:1.6; margin:0; }
+.meaning-setup { max-width:520px; margin:60px auto; display:flex; flex-direction:column; gap:16px; align-items:center; text-align:center; }
+.meaning-setup-icon { font-size:40px; color:var(--accent); }
+.meaning-setup-desc { font-size:13px; color:var(--text-2); line-height:1.7; max-width:440px; }
+.meaning-setup-log { width:100%; max-height:220px; overflow-y:auto; background:var(--bg-1); border:1px solid var(--border); border-radius:var(--r); padding:10px 14px; text-align:left; }
+.meaning-log-line { font-size:12px; color:var(--text-2); font-family:monospace; line-height:1.7; word-break:break-all; }
+
 /* ── Settings ──────────────────────────────────────────── */
 .settings-page { max-width: 560px; }
 .settings-card { background:var(--bg-2); border:1px solid var(--border); border-radius:var(--r-lg); padding:28px 32px; }

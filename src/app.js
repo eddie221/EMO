@@ -1,4 +1,5 @@
 import { invoke } from 'https://unpkg.com/@tauri-apps/api@2/core.js';
+import { listen } from 'https://unpkg.com/@tauri-apps/api@2/event.js';
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const BOX_COLORS = ['#e85d5d','#e8945d','#e8c85d','#8ad65d','#5db8e8'];
@@ -17,8 +18,6 @@ function getBoxes() {
   }));
 }
 
-// Keep BOXES as a live getter so existing code still works
-function getBOXES() { return getBoxes(); }
 
 const BOX_DESCS = [
   'New & difficult cards',
@@ -99,6 +98,14 @@ const state = {
   practicePage: 0,
   practiceResults: {},
   practiceMode: 'flip',
+  // meaning mode
+  meaningEnvReady: null,      // null=unknown, false=not ready, true=ready
+  meaningEnvSetup: false,     // true while setup is running
+  meaningSetupLog: [],
+  meaningSetupError: null,
+  meaningLoading: false,      // true while model loads
+  meaningResult: null,        // {correct, feedback} after evaluation
+  meaningTyped: '',
   practiceQueue: [],
   practiceIdx: 0,
   practiceFlipped: false,
@@ -117,7 +124,12 @@ const api = {
   updateCard:   (id, card)   => invoke('update_card',   { id, card }),
   deleteCard:   (id)         => invoke('delete_card',   { id }),
   reviewCard:   (result)     => invoke('review_card',   { result }),
-  keepInBox1:   (cardId)    => invoke('keep_in_box1',  { cardId }),
+  keepInBox1:       (cardId)                       => invoke('keep_in_box1',       { cardId }),
+  checkPythonEnv:   ()                             => invoke('check_python_env'),
+  setupPythonEnv:   ()                             => invoke('setup_python_env'),
+  startMeaningEval: ()                             => invoke('start_meaning_eval'),
+  evaluateMeaning:  (word, description, userAnswer)=> invoke('evaluate_meaning', { word, description, userAnswer }),
+  stopMeaningEval:  ()                             => invoke('stop_meaning_eval'),
   resetCard:    (id)         => invoke('reset_card',    { id }),
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
   getSettings:  ()           => invoke('get_settings'),
@@ -1490,8 +1502,6 @@ function renderForm() {
     part_of_speech: 'noun', example_sentences: '', usage_frequency: 'common',
   };
 
-  const errors = {};
-
   function fieldInput(key, placeholder, autofocus = false) {
     const wrapper = h('div', { class: 'field', id: `field-${key}` },
       h('label', { class: 'field-label' },
@@ -1889,6 +1899,10 @@ function renderPracticeSelect() {
               class: `mode-toggle-btn${state.practiceMode === 'type' ? ' active' : ''}`,
               onClick: () => { state.practiceMode = 'type'; render(); },
             }, icon('pencil'), ' Word'),
+            h('button', {
+              class: `mode-toggle-btn${state.practiceMode === 'meaning' ? ' active' : ''}`,
+              onClick: () => { state.practiceMode = 'meaning'; render(); },
+            }, icon('chat-text'), ' Meaning'),
           ),
           h('button', {
             class: 'btn-primary btn-sm',
@@ -2089,11 +2103,16 @@ function startPractice() {
   state.practiceTyped       = '';
   state.practiceTypedResult = null;
   state.practiceResults     = {};
+  // meaning mode: reset per-session state
+  state.meaningResult       = null;
+  state.meaningTyped        = '';
+  state.meaningLoading      = false;
   navigate('practice');
 }
 
 function renderPractice() {
   if (state.practiceDone) return renderPracticeDone();
+  if (state.practiceMode === 'meaning') return renderPracticeMeaningCard();
   return state.practiceMode === 'type' ? renderPracticeTypeCard() : renderPracticeCard();
 }
 
@@ -2401,6 +2420,253 @@ function renderPracticeTypeCard() {
       h('span', {}, ' · '),
       h('span', { style: { color: 'var(--text-3)', fontStyle: 'italic' } }, 'Practice mode · no box changes'),
     ),
+  );
+}
+
+// ── Meaning mode ──────────────────────────────────────────────────────────────
+function renderPracticeMeaningCard() {
+  // 1. Env unknown → check now
+  if (state.meaningEnvReady === null) {
+    api.checkPythonEnv().then(ready => {
+      state.meaningEnvReady = ready;
+      render();
+    });
+    return h('div', { class: 'meaning-loading' },
+      h('div', { class: 'meaning-spinner' }),
+      h('p', {}, 'Checking Python environment…'),
+    );
+  }
+
+  // 2. Env not ready → setup screen
+  if (!state.meaningEnvReady) {
+    return renderMeaningSetup();
+  }
+
+  // 3. Model not loaded yet → start loading and wait for eval-ready / eval-error events
+  if (!state.meaningLoading && !window._meaningModelReady) {
+    state.meaningLoading = true;
+    let unlistens = [];
+    const cleanup = () => { unlistens.forEach(fn => fn()); unlistens = []; };
+    Promise.all([
+      listen('eval-ready', () => {
+        cleanup();
+        window._meaningModelReady = true;
+        state.meaningLoading = false;
+        render();
+      }),
+      listen('eval-error', e => {
+        cleanup();
+        state.meaningLoading = false;
+        state.meaningSetupError = e.payload;
+        render();
+      }),
+    ]).then(fns => {
+      unlistens = fns;
+      api.startMeaningEval().catch(e => {
+        cleanup();
+        state.meaningLoading = false;
+        state.meaningSetupError = String(e);
+        render();
+      });
+    });
+  }
+  if (state.meaningLoading) {
+    return h('div', { class: 'meaning-loading' },
+      h('div', { class: 'meaning-spinner' }),
+      h('p', {}, 'Loading model (first time may take a minute)…'),
+    );
+  }
+  if (state.meaningSetupError) {
+    return h('div', { class: 'meaning-loading' },
+      h('p', { class: 'meaning-error' }, icon('exclamation-triangle'), ` ${state.meaningSetupError}`),
+      h('button', { class: 'btn-ghost btn-sm', onClick: () => { state.meaningSetupError = null; window._meaningModelReady = false; render(); } }, 'Retry'),
+    );
+  }
+
+  // 4. Practice card
+  const card  = state.practiceQueue[state.practiceIdx];
+  const total = state.practiceQueue.length;
+  const pct   = (state.practiceIdx / total) * 100;
+  const bInfo = getBoxes()[card.box_number - 1];
+  const result = state.meaningResult;
+
+  const tag = h('div', { class: 'card-box-tag' }, `Box ${card.box_number} · ${bInfo.label}`);
+  tag.style.setProperty('--box-clr', bInfo.color);
+
+  function advance() {
+    const nextIdx = state.practiceIdx + 1;
+    if (nextIdx >= state.practiceQueue.length) {
+      api.stopMeaningEval();
+      window._meaningModelReady = false;
+      state.practiceDone = true;
+    } else {
+      state.practiceIdx = nextIdx;
+    }
+    state.meaningTyped  = '';
+    state.meaningResult = null;
+    render();
+  }
+
+  async function submitMeaning() {
+    if (result !== null || state.meaningLoading) return;
+    const answer = state.meaningTyped.trim();
+    if (!answer) return;
+    state.meaningLoading = true;
+    render();
+    try {
+      const res = await api.evaluateMeaning(card.lang1, card.description_lang1, answer);
+      state.meaningResult  = res;
+      state.practiceTotal += 1;
+      if (res.correct) state.practiceCorrect += 1;
+      if (!state.practiceResults[card.id]) state.practiceResults[card.id] = { forward: null, reverse: null };
+      state.practiceResults[card.id].forward = res.correct;
+    } catch (e) {
+      state.meaningSetupError = String(e);
+    }
+    state.meaningLoading = false;
+    render();
+  }
+
+  const textarea = (() => {
+    const ta = h('textarea', {
+      class: `meaning-input${result ? (result.correct ? ' correct' : ' wrong') : ''}`,
+      placeholder: 'Describe what this word means…',
+      rows: '4',
+    });
+    ta.value = state.meaningTyped;
+    ta.disabled = result !== null || state.meaningLoading;
+    ta.addEventListener('input', e => { state.meaningTyped = e.target.value; });
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && e.ctrlKey) submitMeaning(); });
+    if (!result && !state.meaningLoading) setTimeout(() => ta.focus(), 50);
+    return ta;
+  })();
+
+  return h('div', { class: 'study-wrap' },
+    h('div', { class: 'study-header' },
+      h('button', { class: 'back-btn', onClick: () => { api.stopMeaningEval(); window._meaningModelReady = false; navigate('practice-select'); } }, icon('arrow-left'), ' Exit'),
+      h('div', { class: 'prog-wrap' },
+        h('div', { class: 'prog-bar' }, h('div', { class: 'prog-fill', style: { width: `${pct}%` } })),
+        h('span', { class: 'prog-txt' }, `${state.practiceIdx + 1} / ${total}`),
+      ),
+      h('div', { class: 'session-score' },
+        h('span', { class: 'score-ok'  }, String(state.practiceCorrect)),
+        h('span', { class: 'score-sep' }, '/'),
+        h('span', { class: 'score-tot' }, String(state.practiceTotal)),
+      ),
+    ),
+
+    h('div', { class: 'card-stage' },
+      h('div', { class: 'type-card' },
+        tag,
+        h('div', { class: 'card-word' }, card.lang1),
+        h('div', { class: 'card-pos' }, card.part_of_speech.split('/').map(p => p.trim()).join(' · ')),
+        h('p', { class: 'meaning-prompt' }, 'Describe what this word means:'),
+        textarea,
+        !result && !state.meaningLoading
+          ? h('div', { class: 'meaning-actions' },
+              h('button', { class: 'btn-primary', onClick: submitMeaning }, 'Check'),
+              h('span', { class: 'meaning-hint' }, 'Ctrl+Enter to submit'),
+            )
+          : null,
+        state.meaningLoading
+          ? h('div', { class: 'meaning-eval-row' }, h('div', { class: 'meaning-spinner-sm' }), ' Evaluating…')
+          : null,
+        result
+          ? h('div', { class: `meaning-result ${result.correct ? 'correct' : 'wrong'}` },
+              h('div', { class: 'meaning-result-verdict' },
+                result.correct ? icon('check-circle') : icon('x-circle'),
+                result.correct ? ' Correct!' : ' Not quite',
+              ),
+              card.description_lang1
+                ? h('div', { class: 'meaning-result-ref' },
+                    h('span', { class: 'card-sec-label' }, 'Reference: '),
+                    card.description_lang1,
+                  )
+                : null,
+              h('p', { class: 'meaning-feedback' }, result.feedback),
+              h('div', { class: 'meaning-actions' },
+                h('button', { class: 'btn-primary', onClick: advance },
+                  state.practiceIdx + 1 >= total ? 'Finish' : h('span', {}, 'Next ', icon('arrow-right'))),
+              ),
+            )
+          : null,
+      ),
+    ),
+
+    h('div', { class: 'card-meta-bar' },
+      `Reviews: ${card.total_reviews}`,
+      h('span', {}, ' · '),
+      `Accuracy: ${card.total_reviews ? Math.round((card.correct_reviews / card.total_reviews) * 100) : 0}%`,
+      h('span', {}, ' · '),
+      h('span', { style: { color: 'var(--text-3)', fontStyle: 'italic' } }, 'Meaning mode · evaluated by AI'),
+    ),
+  );
+}
+
+function renderMeaningSetup() {
+  const running = state.meaningEnvSetup;
+  const log     = state.meaningSetupLog;
+
+  async function runSetup() {
+    state.meaningEnvSetup  = true;
+    state.meaningSetupLog  = ['Starting setup…'];
+    state.meaningSetupError = null;
+    render();
+
+    let unlistens = [];
+    const cleanup = () => { unlistens.forEach(fn => fn()); unlistens = []; };
+
+    // Register all event listeners before invoking so no event is missed.
+    unlistens = await Promise.all([
+      listen('setup-log', e => {
+        state.meaningSetupLog.push(e.payload);
+        render();
+      }),
+      listen('setup-done', () => {
+        cleanup();
+        state.meaningEnvSetup = false;
+        state.meaningEnvReady = true;  // triggers model-loading screen on next render
+        render();
+      }),
+      listen('setup-error', e => {
+        cleanup();
+        state.meaningEnvSetup = false;
+        state.meaningSetupError = e.payload;
+        state.meaningSetupLog.push(`Error: ${e.payload}`);
+        render();
+      }),
+    ]);
+
+    // Fire-and-forget — the command returns immediately; completion comes via events.
+    api.setupPythonEnv().catch(e => {
+      cleanup();
+      state.meaningEnvSetup = false;
+      state.meaningSetupError = String(e);
+      state.meaningSetupLog.push(`Error: ${e}`);
+      render();
+    });
+  }
+
+  return h('div', { class: 'meaning-setup' },
+    h('div', { class: 'meaning-setup-icon' }, icon('cpu')),
+    h('h2', {}, 'Python Environment Required'),
+    h('p', { class: 'meaning-setup-desc' },
+      'Meaning mode uses a local AI model (Qwen3-VL-2B-Instruct) to evaluate your answers. ',
+      'A Python virtual environment named "EMO" will be created next to the database, ',
+      'and the model (~4 GB) will be downloaded.',
+    ),
+    !running
+      ? h('button', { class: 'btn-primary', onClick: runSetup }, icon('download'), ' Set Up Now')
+      : null,
+    log.length > 0
+      ? h('div', { class: 'meaning-setup-log' },
+          ...log.map(line => h('div', { class: 'meaning-log-line' }, line)),
+        )
+      : null,
+    state.meaningSetupError && !running
+      ? h('p', { class: 'meaning-error' }, icon('exclamation-triangle'), ` ${state.meaningSetupError}`)
+      : null,
+    running ? h('div', { class: 'meaning-spinner' }) : null,
   );
 }
 

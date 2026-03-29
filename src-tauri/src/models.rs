@@ -36,6 +36,12 @@ pub struct ReviewResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct EvalResult {
+    pub correct: bool,
+    pub feedback: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Stats {
     pub total_cards: i32,
     pub box_counts: Vec<i32>,

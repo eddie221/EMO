@@ -6,7 +6,9 @@ pub mod models;
 use commands::{
     add_card, delete_card, get_all_cards, get_due_cards, get_settings, get_stats,
     reset_card, review_card, keep_in_box1, save_settings, update_card, save_csv, move_card,
+    check_python_env, setup_python_env, start_meaning_eval, evaluate_meaning, stop_meaning_eval,
 };
+use commands::{EvalStateInner, MeaningEvalState};
 use db::{init_db, DbState};
 use std::sync::Mutex;
 
@@ -21,12 +23,26 @@ pub fn run() {
     init_db(&conn).expect("Failed to initialise database");
 
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Debug)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("emo".into()),
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .manage(DbState(Mutex::new(conn)))
+        .manage(MeaningEvalState(Mutex::new(EvalStateInner::Idle)))
         .invoke_handler(tauri::generate_handler![
             get_all_cards, get_due_cards, add_card, update_card,
             delete_card, review_card, keep_in_box1, get_stats, reset_card,
             get_settings, save_settings, save_csv, move_card,
+            check_python_env, setup_python_env, start_meaning_eval,
+            evaluate_meaning, stop_meaning_eval,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
