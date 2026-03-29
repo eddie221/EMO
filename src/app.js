@@ -54,6 +54,12 @@ const state = {
   stats: null,
   editCard: null,
   // study
+  studySort: 'due',
+  studySelected: new Set(),
+  studyStarted: false,
+  studyPageSize: 25,
+  studyPage: 0,
+  studyRandomCount: 10,
   studyQueue: [],
   studyIdx: 0,
   studyFlipped: false,
@@ -64,6 +70,7 @@ const state = {
   studyWrong: [],
   studyResults: {},
   // library
+  libSort: 'az',
   libSearch: '',
   libFilterBox: new Set(),
   libFilterPos: new Set(),
@@ -80,6 +87,7 @@ const state = {
   // settings
   boxDays: [1, 3, 7, 14, 30],
   // practice
+  practiceSort: 'az',
   practiceSelected: new Set(),
   practiceSearch: '',
   practiceFilterBox: null,
@@ -109,6 +117,7 @@ const api = {
   updateCard:   (id, card)   => invoke('update_card',   { id, card }),
   deleteCard:   (id)         => invoke('delete_card',   { id }),
   reviewCard:   (result)     => invoke('review_card',   { result }),
+  keepInBox1:   (cardId)    => invoke('keep_in_box1',  { cardId }),
   resetCard:    (id)         => invoke('reset_card',    { id }),
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
   getSettings:  ()           => invoke('get_settings'),
@@ -276,7 +285,7 @@ function renderDashboard() {
           ? h('button', { class: 'btn-ghost', onClick: () => { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); navigate('practice-select'); } }, icon('record-circle'), ' Practice')
           : null,
         due > 0
-          ? h('button', { class: 'btn-primary', onClick: () => navigate('study') },
+          ? h('button', { class: 'btn-primary', onClick: () => { state.studyStarted = false; state.studySelected = new Set(); navigate('study'); } },
               icon('book'), ` Study ${due} card${due !== 1 ? 's' : ''} due`)
           : null,
       ),
@@ -359,8 +368,7 @@ function renderRecent() {
 }
 
 // ── Study ─────────────────────────────────────────────────────────────────────
-function initStudy() {
-  const cards = state.dueCards;
+function initStudy(cards) {
   state.studyQueue = [
     ...cards.map(c => ({ ...c, reversed: false })),
     ...cards.map(c => ({ ...c, reversed: true  })),
@@ -373,16 +381,147 @@ function initStudy() {
   state.studyAnimating = false;
   state.studyWrong     = [];
   state.studyResults   = {};
+  state.studyStarted   = true;
 }
 
 function renderStudy() {
-  if (state.studyQueue.length === 0 && !state.studyDone) {
-    return renderStudyEmpty();
-  }
-  if (state.studyDone) {
-    return renderStudyDone();
-  }
+  if (!state.studyStarted)                               return renderStudySelect();
+  if (state.studyDone)                                   return renderStudyDone();
+  if (state.studyQueue.length === 0 && !state.studyDone) return renderStudyEmpty();
   return renderStudyCard();
+}
+
+function renderStudySelect() {
+  const due        = applySort(state.dueCards, state.studySort);
+  const selCount   = state.studySelected.size;
+  const allSel     = due.length > 0 && due.every(c => state.studySelected.has(c.id));
+  const pageSize   = state.studyPageSize === 0 ? due.length : state.studyPageSize;
+  const totalPages = Math.max(1, Math.ceil(due.length / pageSize));
+  if (state.studyPage >= totalPages) state.studyPage = totalPages - 1;
+  const paged = due.slice(state.studyPage * pageSize, (state.studyPage + 1) * pageSize);
+
+  function startStudy() {
+    const cards = due.filter(c => state.studySelected.has(c.id));
+    if (!cards.length) return;
+    initStudy(cards);
+    render();
+  }
+
+  return h('div', { class: 'practice-select' },
+    h('div', { class: 'page-header' },
+      h('div', {},
+        h('h1', { class: 'page-title' }, 'Study'),
+        h('p',  { class: 'page-subtitle' },
+          selCount > 0
+            ? `${selCount} card${selCount !== 1 ? 's' : ''} selected · ${due.length} due today`
+            : `${due.length} card${due.length !== 1 ? 's' : ''} due today`),
+      ),
+      h('div', { class: 'study-toolbar' },
+        h('div', { class: 'study-toolbar-row1' },
+          h('button', { class: 'btn-ghost btn-sm', onClick: () => {
+            if (allSel) due.forEach(c => state.studySelected.delete(c.id));
+            else        due.forEach(c => state.studySelected.add(c.id));
+            render();
+          }}, allSel ? 'Deselect all' : 'Select all'),
+          (() => {
+            const pageSel = paged.length > 0 && paged.every(c => state.studySelected.has(c.id));
+            const btn = h('button', { class: 'btn-ghost btn-sm' }, pageSel ? 'Deselect page' : 'Select page');
+            btn.addEventListener('click', () => {
+              if (pageSel) paged.forEach(c => state.studySelected.delete(c.id));
+              else         paged.forEach(c => state.studySelected.add(c.id));
+              render();
+            });
+            return btn;
+          })(),
+          h('button', {
+            class: 'btn-primary btn-sm',
+            disabled: selCount === 0,
+            onClick: selCount > 0 ? startStudy : null,
+          }, icon('book'), selCount > 0 ? ` Study (${selCount})` : ' Study'),
+        ),
+        h('div', { class: 'study-toolbar-row2' },
+          h('div', { class: 'study-random-pick' },
+            (() => {
+              const inp = h('input', { type: 'number', class: 'study-random-input', min: '1', max: String(due.length), value: String(state.studyRandomCount) });
+              inp.addEventListener('change', () => {
+                const v = parseInt(inp.value, 10);
+                if (!isNaN(v) && v > 0) state.studyRandomCount = v;
+              });
+              return inp;
+            })(),
+            (() => {
+              const btn = h('button', { class: 'btn-ghost btn-sm' }, icon('shuffle'), ' Random');
+              btn.addEventListener('click', () => {
+                const n = Math.min(state.studyRandomCount, due.length);
+                const shuffled = [...due].sort(() => Math.random() - 0.5).slice(0, n);
+                state.studySelected = new Set(shuffled.map(c => c.id));
+                render();
+              });
+              return btn;
+            })(),
+          ),
+          h('div', { class: 'study-divider' }),
+          h('span', { class: 'filter-label' }, 'Show'),
+          h('div', { class: 'size-toggle' },
+            ...[25, 50, 100, 0].map(n => {
+              const b = h('button', { class: `size-btn${state.studyPageSize === n ? ' active' : ''}` }, n === 0 ? 'All' : String(n));
+              b.addEventListener('click', () => { state.studyPageSize = n; state.studyPage = 0; render(); });
+              return b;
+            }),
+          ),
+          h('div', { class: 'study-divider' }),
+          sortControl(state.studySort, v => { state.studySort = v; state.studyPage = 0; render(); }),
+        ),
+      ),
+    ),
+
+    due.length === 0
+      ? h('div', { class: 'study-done' },
+          h('div', { class: 'done-icon' }, icon('stars')),
+          h('h2', {}, 'Nothing due right now'),
+          h('p',  {}, 'All cards are scheduled for later. Check back soon!'),
+          h('button', { class: 'btn-primary', onClick: () => navigate('dashboard') }, 'Back to Overview'),
+        )
+      : h('div', {},
+          h('div', { class: 'card-list' },
+            ...paged.map(card => {
+              const checked = state.studySelected.has(card.id);
+              return h('div', {
+                class: `card-row${checked ? ' selected' : ''}`,
+                onClick: () => {
+                  if (checked) state.studySelected.delete(card.id);
+                  else         state.studySelected.add(card.id);
+                  render();
+                },
+              },
+                h('div', { class: 'card-row-top' },
+                  h('div', { class: `practice-check${checked ? ' checked' : ''}` }, checked ? icon('check-lg') : null),
+                  h('div', { class: 'row-words' },
+                    h('span', { class: 'row-l1' }, card.lang1),
+                    h('span', { class: 'row-sep' }, icon('arrow-right')),
+                    h('span', { class: 'row-l2' }, card.lang2),
+                  ),
+                  h('div', { class: 'row-chips' },
+                    ...posChips(card.part_of_speech),
+                    freqChip(card.usage_frequency),
+                    boxChip(card.box_number),
+                    accChip(card),
+                  ),
+                ),
+              );
+            }),
+          ),
+          totalPages > 1
+            ? h('div', { class: 'pagination' },
+                h('button', { class: 'btn-ghost', disabled: state.studyPage === 0,
+                  onClick: () => { state.studyPage--; render(); } }, icon('arrow-left'), ' Prev'),
+                h('span', { class: 'page-info' }, `Page ${state.studyPage + 1} of ${totalPages}`),
+                h('button', { class: 'btn-ghost', disabled: state.studyPage >= totalPages - 1,
+                  onClick: () => { state.studyPage++; render(); } }, 'Next ', icon('arrow-right')),
+              )
+            : null,
+        ),
+  );
 }
 
 function renderStudyEmpty() {
@@ -523,6 +662,31 @@ function renderStudyCard() {
           }
         },
       }, icon('arrow-left'), ' Back'),
+      (() => {
+        const btn = h('button', { class: 'nav-btn keep-box1-btn' }, icon('pin-angle'), ' Keep in Box 1');
+        btn.addEventListener('click', async () => {
+          if (state.studyAnimating) return;
+          state.studyAnimating = true;
+          const id = item.id;
+          const updated = await api.keepInBox1(id);
+          // replace card in state.cards
+          const ci = state.cards.findIndex(c => c.id === id);
+          if (ci !== -1) state.cards[ci] = updated;
+          computeDerived();
+          // remove all queue entries for this card, adjusting idx
+          const before = state.studyQueue.slice(0, state.studyIdx).filter(c => c.id !== id).length;
+          state.studyQueue = state.studyQueue.filter(c => c.id !== id);
+          state.studyIdx = Math.min(before, state.studyQueue.length - 1);
+          if (state.studyQueue.length === 0) {
+            await batchApplyResults();
+            state.studyDone = true;
+          }
+          state.studyFlipped  = false;
+          state.studyAnimating = false;
+          render();
+        });
+        return btn;
+      })(),
       h('button', {
         class: `nav-btn${state.studyIdx >= total - 1 ? ' disabled' : ''}`,
         onClick: () => {
@@ -558,13 +722,13 @@ function buildFlashcard(card, bInfo) {
   const frontWord  = reversed ? card.lang2 : card.lang1;
   const backWord   = reversed ? card.lang1 : card.lang2;
 
+  const posLine = () => h('div', { class: 'card-pos' }, card.part_of_speech.split('/').map(p => p.trim()).join(' · '));
+
   const front = h('div', { class: 'card-face card-front' },
     tag.cloneNode(true),
     h('div', { class: 'card-word' }, frontWord),
-    !reversed
-      ? h('div', { class: 'card-pos' }, card.part_of_speech.split('/').map(p => p.trim()).join(' · '))
-      : null,
-    !reversed && card.usage_frequency
+    posLine(),
+    card.usage_frequency
       ? h('div', { class: 'card-freq' }, h('span', { class: 'freq-dot' }), card.usage_frequency)
       : null,
     reversed && card.description_lang1
@@ -579,15 +743,8 @@ function buildFlashcard(card, bInfo) {
   const backChildren = [
     tag.cloneNode(true),
     h('div', { class: reversed ? 'card-word' : 'card-translation' }, backWord),
+    posLine(),
   ];
-
-  if (reversed) {
-    backChildren.push(
-      h('div', { class: 'card-pos', style: { marginTop: '6px' } },
-        card.part_of_speech.split('/').map(p => p.trim()).join(' · '),
-      ),
-    );
-  }
 
   if (card.description_lang1) {
     backChildren.push(
@@ -694,9 +851,48 @@ async function batchApplyResults() {
 }
 
 // ── Library ────────────────────────────────────────────────────────────────────
+const SORT_OPTS = [
+  { key: 'az',    label: 'A→Z'    },
+  { key: 'za',    label: 'Z→A'    },
+  { key: 'box_asc',  label: 'Box ↑'  },
+  { key: 'box_desc', label: 'Box ↓'  },
+  { key: 'due',   label: 'Due'    },
+  { key: 'acc_asc',  label: 'Acc ↑'  },
+  { key: 'acc_desc', label: 'Acc ↓'  },
+];
+
+function applySort(cards, sortKey) {
+  const acc = c => c.total_reviews > 0 ? c.correct_reviews / c.total_reviews : -1;
+  return [...cards].sort((a, b) => {
+    switch (sortKey) {
+      case 'za':       return b.lang1.localeCompare(a.lang1);
+      case 'box_asc':  return a.box_number - b.box_number;
+      case 'box_desc': return b.box_number - a.box_number;
+      case 'due':      return a.next_review.localeCompare(b.next_review);
+      case 'acc_asc':  return acc(a) - acc(b);
+      case 'acc_desc': return acc(b) - acc(a);
+      default:         return a.lang1.localeCompare(b.lang1); // az
+    }
+  });
+}
+
+function sortControl(sortKey, onChange) {
+  const sel = h('select', { class: 'sort-select' });
+  SORT_OPTS.forEach(({ key, label }) => {
+    const opt = h('option', { value: key }, label);
+    if (key === sortKey) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => onChange(sel.value));
+  return h('div', { class: 'sort-control' },
+    h('span', { class: 'filter-label' }, 'Sort'),
+    sel,
+  );
+}
+
 function getFiltered() {
   const dueSet = state.libFilterDue ? new Set(state.dueCards.map(c => c.id)) : null;
-  return state.cards.filter(c => {
+  const filtered = state.cards.filter(c => {
     const q = state.libSearch.toLowerCase();
     const matchSearch = !q
       || c.lang1.toLowerCase().includes(q)
@@ -709,6 +905,7 @@ function getFiltered() {
     const matchDue = !dueSet || dueSet.has(c.id);
     return matchSearch && matchBox && matchPos && matchAcc && matchDue;
   });
+  return applySort(filtered, state.libSort);
 }
 
 function renderLibrary() {
@@ -740,14 +937,17 @@ function renderLibrary() {
           sel ? 'Cancel' : 'Select',
         ),
         filtered.length > 0
-          ? h('button', { class: 'btn-ghost', onClick: () => exportCSV(filtered) },
-              state.libFilterBox.size === 1 ? h('span', {}, icon('download'), ` Export Box ${[...state.libFilterBox][0]}`) : h('span', {}, icon('download'), ' Export CSV'))
+          ? h('div', { class: 'split-btn' },
+              h('button', { class: 'split-btn-main', onClick: () => exportCSV(filtered) },
+                icon('upload'),
+                state.libFilterBox.size === 1 ? ` Export Box ${[...state.libFilterBox][0]}` : ' Export CSV'),
+            )
           : null,
         h('div', { class: 'split-btn' },
-          h('button', { class: 'split-btn-main csv-import-btn', onClick: triggerImport }, icon('upload'), ' Import CSV'),
+          h('button', { class: 'split-btn-main csv-import-btn', onClick: triggerImport }, icon('download'), ' Import CSV'),
           h('button', { class: 'split-btn-help', onClick: () => { state.showImportHelp = true; render(); }, title: 'CSV format help' }, '?'),
         ),
-        h('button', { class: 'btn-primary', onClick: () => { state.editCard = null; navigate('add'); } }, '+ New Card'),
+        h('button', { class: 'btn-primary btn-sm', onClick: () => { state.editCard = null; navigate('add'); } }, '+ New Card'),
       ),
     ),
 
@@ -771,7 +971,7 @@ function renderLibrary() {
           ? h('button', { class: 'search-clear', onClick: () => { state.libSearch = ''; resetPage(); render(); } }, icon('x'))
           : null,
       ),
-      // row 1: box filter (multi-select)
+      // row 1: box filter + due today
       h('div', { class: 'filter-row' },
         h('span', { class: 'filter-label' }, 'Box'),
         h('div', { class: 'filter-group' },
@@ -792,6 +992,11 @@ function renderLibrary() {
             return b;
           }),
         ),
+        (() => {
+          const b = h('button', { class: `filter-chip${state.libFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
+          b.addEventListener('click', () => { state.libFilterDue = !state.libFilterDue; resetPage(); render(); });
+          return b;
+        })(),
       ),
       // row 2: POS chips + page-size control
       h('div', { class: 'filter-row' },
@@ -841,11 +1046,7 @@ function renderLibrary() {
             return b;
           }),
         ),
-        (() => {
-          const b = h('button', { class: `filter-chip${state.libFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
-          b.addEventListener('click', () => { state.libFilterDue = !state.libFilterDue; resetPage(); render(); });
-          return b;
-        })(),
+        sortControl(state.libSort, v => { state.libSort = v; resetPage(); render(); }),
       ),
     ),
 
@@ -1645,7 +1846,7 @@ function triggerImport() {
 // ── Practice ──────────────────────────────────────────────────────────────────
 function renderPracticeSelect() {
   const practiceDueSet = state.practiceFilterDue ? new Set(state.dueCards.map(c => c.id)) : null;
-  const filtered = state.cards.filter(c => {
+  const filtered = applySort(state.cards.filter(c => {
     const q = state.practiceSearch.toLowerCase();
     const matchSearch = !q
       || c.lang1.toLowerCase().includes(q)
@@ -1657,7 +1858,7 @@ function renderPracticeSelect() {
     const matchAcc = matchAccFilter(c, state.practiceFilterAcc);
     const matchDue = !practiceDueSet || practiceDueSet.has(c.id);
     return matchSearch && matchBox && matchPos && matchAcc && matchDue;
-  });
+  }), state.practiceSort);
 
   function resetPracticePage() { state.practicePage = 0; }
   const pageSize    = state.practicePageSize === 0 ? filtered.length : state.practicePageSize;
@@ -1690,7 +1891,7 @@ function renderPracticeSelect() {
             }, icon('pencil'), ' Word'),
           ),
           h('button', {
-            class: 'btn-primary',
+            class: 'btn-primary btn-sm',
             disabled: selCount === 0,
             onClick: selCount > 0 ? startPractice : null,
           }, icon('play-fill'), selCount > 0 ? ` Start (${selCount})` : ' Start'),
@@ -1766,6 +1967,11 @@ function renderPracticeSelect() {
             return b;
           }),
         ),
+        (() => {
+          const b = h('button', { class: `filter-chip${state.practiceFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
+          b.addEventListener('click', () => { state.practiceFilterDue = !state.practiceFilterDue; render(); });
+          return b;
+        })(),
       ),
       h('div', { class: 'filter-row' },
         h('span', { class: 'filter-label' }, 'POS'),
@@ -1813,11 +2019,7 @@ function renderPracticeSelect() {
             return b;
           }),
         ),
-        (() => {
-          const b = h('button', { class: `filter-chip${state.practiceFilterDue ? ' active due-chip' : ''}` }, icon('clock'), ' Due Today');
-          b.addEventListener('click', () => { state.practiceFilterDue = !state.practiceFilterDue; render(); });
-          return b;
-        })(),
+        sortControl(state.practiceSort, v => { state.practiceSort = v; resetPracticePage(); render(); }),
       ),
     ),
 
@@ -2034,15 +2236,16 @@ function buildPracticeFlashcard(card, bInfo) {
   const backChildren = [
     tag.cloneNode(true),
     h('div', { class: 'card-translation' }, backWord),
+    h('div', { class: 'card-pos' }, card.part_of_speech.split('/').map(p => p.trim()).join(' · ')),
   ];
-  if (!card.reversed && card.description_lang1) backChildren.push(
+  if (card.description_lang1) backChildren.push(
     h('hr', { class: 'card-divider' }),
     h('div', { class: 'card-section' },
       h('span', { class: 'card-sec-label' }, 'Definition'),
       h('p',    { class: 'card-sec-body'  }, card.description_lang1),
     ),
   );
-  if (!card.reversed && card.example_sentences) backChildren.push(
+  if (card.example_sentences) backChildren.push(
     h('hr', { class: 'card-divider' }),
     h('div', { class: 'card-section' },
       h('span', { class: 'card-sec-label' }, 'Examples'),
@@ -2337,7 +2540,7 @@ function buildSidebar() {
         class: `nav-item${isActive ? ' active' : ''}`,
         'data-view': item.view,
         onClick: () => {
-          if (item.view === 'study') initStudy();
+          if (item.view === 'study') { state.studyStarted = false; state.studySelected = new Set(); }
           if (isPracticeItem) { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); }
           navigate(item.view);
         },

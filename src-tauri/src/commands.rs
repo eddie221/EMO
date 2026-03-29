@@ -1,4 +1,4 @@
-use chrono::Local;
+use chrono::{Duration, Local, NaiveTime, TimeZone};
 use rusqlite::params;
 use tauri::State;
 use uuid::Uuid;
@@ -185,6 +185,29 @@ pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashc
     conn.query_row(
         &format!("{} WHERE id=?1", SELECT_ALL),
         params![result.card_id],
+        |row| row_to_card(row),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn keep_in_box1(state: State<DbState>, card_id: String) -> Result<Flashcard, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let tomorrow = (Local::now() + Duration::days(1)).date_naive();
+    let next_review = Local
+        .from_local_datetime(&tomorrow.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()))
+        .unwrap()
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    conn.execute(
+        "UPDATE flashcards SET box_number=1, next_review=?1, updated_at=?2 WHERE id=?3",
+        params![next_review, now, card_id],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.query_row(
+        &format!("{} WHERE id=?1", SELECT_ALL),
+        params![card_id],
         |row| row_to_card(row),
     )
     .map_err(|e| e.to_string())

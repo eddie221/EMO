@@ -6,6 +6,7 @@ Enhanced Memory Optimization (EMO) is based on the spaced repetition principle, 
 
 ## Functions
 - [X] Practice mode
+- [ ] LLM for meaning quiz mode
 - [X] Study mode (Leitner System)
     - [X] Customize reviewing days
 - [X] Export/Import words

@@ -5,7 +5,7 @@ pub mod models;
 
 use commands::{
     add_card, delete_card, get_all_cards, get_due_cards, get_settings, get_stats,
-    reset_card, review_card, save_settings, update_card, save_csv, move_card,
+    reset_card, review_card, keep_in_box1, save_settings, update_card, save_csv, move_card,
 };
 use db::{init_db, DbState};
 use std::sync::Mutex;
@@ -25,7 +25,7 @@ pub fn run() {
         .manage(DbState(Mutex::new(conn)))
         .invoke_handler(tauri::generate_handler![
             get_all_cards, get_due_cards, add_card, update_card,
-            delete_card, review_card, get_stats, reset_card,
+            delete_card, review_card, keep_in_box1, get_stats, reset_card,
             get_settings, save_settings, save_csv, move_card,
         ])
         .run(tauri::generate_context!())
