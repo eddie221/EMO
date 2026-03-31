@@ -1,5 +1,5 @@
-import { invoke } from 'https://unpkg.com/@tauri-apps/api@2/core.js';
-import { listen } from 'https://unpkg.com/@tauri-apps/api@2/event.js';
+const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const BOX_COLORS = ['#e85d5d','#e8945d','#e8c85d','#8ad65d','#5db8e8'];
@@ -55,6 +55,7 @@ const state = {
   // study
   studySort: 'due',
   studySelected: new Set(),
+  studyFilterBox: null,
   studyStarted: false,
   studyPageSize: 25,
   studyPage: 0,
@@ -104,6 +105,7 @@ const state = {
   meaningSetupLog: [],
   meaningSetupError: null,
   meaningLoading: false,      // true while model loads
+  meaningForceRedownload: false,
   meaningResult: null,        // {correct, feedback} after evaluation
   meaningTyped: '',
   practiceQueue: [],
@@ -126,7 +128,8 @@ const api = {
   reviewCard:   (result)     => invoke('review_card',   { result }),
   keepInBox1:       (cardId)                       => invoke('keep_in_box1',       { cardId }),
   checkPythonEnv:   ()                             => invoke('check_python_env'),
-  setupPythonEnv:   ()                             => invoke('setup_python_env'),
+  checkModelCached: ()                             => invoke('check_model_cached'),
+  setupPythonEnv:   (hfToken, forceRedownload)       => invoke('setup_python_env', { hfToken: hfToken || null, forceRedownload: !!forceRedownload }),
   startMeaningEval: ()                             => invoke('start_meaning_eval'),
   evaluateMeaning:  (word, description, userAnswer)=> invoke('evaluate_meaning', { word, description, userAnswer }),
   stopMeaningEval:  ()                             => invoke('stop_meaning_eval'),
@@ -297,7 +300,7 @@ function renderDashboard() {
           ? h('button', { class: 'btn-ghost', onClick: () => { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); navigate('practice-select'); } }, icon('record-circle'), ' Practice')
           : null,
         due > 0
-          ? h('button', { class: 'btn-primary', onClick: () => { state.studyStarted = false; state.studySelected = new Set(); navigate('study'); } },
+          ? h('button', { class: 'btn-primary', onClick: () => { state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; navigate('study'); } },
               icon('book'), ` Study ${due} card${due !== 1 ? 's' : ''} due`)
           : null,
       ),
@@ -404,7 +407,8 @@ function renderStudy() {
 }
 
 function renderStudySelect() {
-  const due        = applySort(state.dueCards, state.studySort);
+  const allDue     = applySort(state.dueCards, state.studySort);
+  const due        = state.studyFilterBox === null ? allDue : allDue.filter(c => c.box_number === state.studyFilterBox);
   const selCount   = state.studySelected.size;
   const allSel     = due.length > 0 && due.every(c => state.studySelected.has(c.id));
   const pageSize   = state.studyPageSize === 0 ? due.length : state.studyPageSize;
@@ -426,10 +430,19 @@ function renderStudySelect() {
         h('p',  { class: 'page-subtitle' },
           selCount > 0
             ? `${selCount} card${selCount !== 1 ? 's' : ''} selected · ${due.length} due today`
-            : `${due.length} card${due.length !== 1 ? 's' : ''} due today`),
+            : state.studyFilterBox !== null
+              ? `${due.length} of ${allDue.length} due today (Box ${state.studyFilterBox})`
+              : `${due.length} card${due.length !== 1 ? 's' : ''} due today`),
       ),
-      h('div', { class: 'study-toolbar' },
-        h('div', { class: 'study-toolbar-row1' },
+      h('div', { class: 'practice-header-actions' },
+        h('div', { class: 'practice-header-row1' },
+          h('button', {
+            class: 'btn-primary btn-sm',
+            disabled: selCount === 0,
+            onClick: selCount > 0 ? startStudy : null,
+          }, icon('book'), selCount > 0 ? ` Study (${selCount})` : ' Study'),
+        ),
+        h('div', { class: 'practice-header-row2' },
           h('button', { class: 'btn-ghost btn-sm', onClick: () => {
             if (allSel) due.forEach(c => state.studySelected.delete(c.id));
             else        due.forEach(c => state.studySelected.add(c.id));
@@ -445,24 +458,25 @@ function renderStudySelect() {
             });
             return btn;
           })(),
-          h('button', {
-            class: 'btn-primary btn-sm',
-            disabled: selCount === 0,
-            onClick: selCount > 0 ? startStudy : null,
-          }, icon('book'), selCount > 0 ? ` Study (${selCount})` : ' Study'),
-        ),
-        h('div', { class: 'study-toolbar-row2' },
-          h('div', { class: 'study-random-pick' },
+          h('div', { class: 'random-pick' },
             (() => {
-              const inp = h('input', { type: 'number', class: 'study-random-input', min: '1', max: String(due.length), value: String(state.studyRandomCount) });
+              const inp = h('input', {
+                class: 'random-pick-input',
+                type: 'number', min: '1', max: String(due.length || 1),
+                value: String(Math.min(state.studyRandomCount, due.length || 1)),
+              });
               inp.addEventListener('change', () => {
-                const v = parseInt(inp.value, 10);
-                if (!isNaN(v) && v > 0) state.studyRandomCount = v;
+                const v = Math.max(1, parseInt(inp.value, 10) || 1);
+                state.studyRandomCount = v;
+                render();
               });
               return inp;
             })(),
             (() => {
-              const btn = h('button', { class: 'btn-ghost btn-sm' }, icon('shuffle'), ' Random');
+              const btn = h('button', {
+                class: 'btn-ghost btn-sm',
+                disabled: due.length === 0,
+              }, icon('shuffle'), ' Random');
               btn.addEventListener('click', () => {
                 const n = Math.min(state.studyRandomCount, due.length);
                 const shuffled = [...due].sort(() => Math.random() - 0.5).slice(0, n);
@@ -472,7 +486,33 @@ function renderStudySelect() {
               return btn;
             })(),
           ),
-          h('div', { class: 'study-divider' }),
+        ),
+      ),
+    ),
+
+    h('div', { class: 'filters-bar' },
+      h('div', { class: 'filter-row' },
+        h('span', { class: 'filter-label' }, 'Box'),
+        h('div', { class: 'filter-group' },
+          (() => {
+            const b = h('button', { class: `filter-chip${state.studyFilterBox === null ? ' active' : ''}` }, 'All');
+            b.addEventListener('click', () => { state.studyFilterBox = null; state.studyPage = 0; render(); });
+            return b;
+          })(),
+          ...getBoxes().map(box => {
+            const active = state.studyFilterBox === box.box;
+            const count  = allDue.filter(c => c.box_number === box.box).length;
+            const b = h('button', { class: `filter-chip${active ? ' active' : ''}` }, `Box ${box.box} (${count})`);
+            if (active) b.style.setProperty('--box-clr', box.color);
+            b.addEventListener('click', () => {
+              state.studyFilterBox = active ? null : box.box;
+              state.studyPage = 0;
+              render();
+            });
+            return b;
+          }),
+        ),
+        h('div', { class: 'size-control' },
           h('span', { class: 'filter-label' }, 'Show'),
           h('div', { class: 'size-toggle' },
             ...[25, 50, 100, 0].map(n => {
@@ -481,9 +521,8 @@ function renderStudySelect() {
               return b;
             }),
           ),
-          h('div', { class: 'study-divider' }),
-          sortControl(state.studySort, v => { state.studySort = v; state.studyPage = 0; render(); }),
         ),
+        sortControl(state.studySort, v => { state.studySort = v; state.studyPage = 0; render(); }),
       ),
     ),
 
@@ -2425,19 +2464,19 @@ function renderPracticeTypeCard() {
 
 // ── Meaning mode ──────────────────────────────────────────────────────────────
 function renderPracticeMeaningCard() {
-  // 1. Env unknown → check now
+  // 1. Model status unknown → check now
   if (state.meaningEnvReady === null) {
-    api.checkPythonEnv().then(ready => {
-      state.meaningEnvReady = ready;
+    api.checkModelCached().then(cached => {
+      state.meaningEnvReady = cached;
       render();
     });
     return h('div', { class: 'meaning-loading' },
       h('div', { class: 'meaning-spinner' }),
-      h('p', {}, 'Checking Python environment…'),
+      h('p', {}, 'Checking model…'),
     );
   }
 
-  // 2. Env not ready → setup screen
+  // 2. Model not downloaded → setup screen
   if (!state.meaningEnvReady) {
     return renderMeaningSetup();
   }
@@ -2477,9 +2516,26 @@ function renderPracticeMeaningCard() {
     );
   }
   if (state.meaningSetupError) {
+    const isCacheError = state.meaningSetupError.includes('not found in local cache')
+      || state.meaningSetupError.includes('not fully cached');
     return h('div', { class: 'meaning-loading' },
       h('p', { class: 'meaning-error' }, icon('exclamation-triangle'), ` ${state.meaningSetupError}`),
-      h('button', { class: 'btn-ghost btn-sm', onClick: () => { state.meaningSetupError = null; window._meaningModelReady = false; render(); } }, 'Retry'),
+      h('div', { class: 'meaning-error-actions' },
+        h('button', { class: 'btn-ghost btn-sm', onClick: () => {
+          state.meaningSetupError = null;
+          window._meaningModelReady = false;
+          render();
+        }}, 'Retry'),
+        isCacheError
+          ? h('button', { class: 'btn-primary btn-sm', onClick: () => {
+              state.meaningSetupError = null;
+              state.meaningEnvReady = false;
+              state.meaningForceRedownload = true;
+              window._meaningModelReady = false;
+              render();
+            }}, icon('download'), ' Re-download Model')
+          : null,
+      ),
     );
   }
 
@@ -2608,6 +2664,9 @@ function renderMeaningSetup() {
   const log     = state.meaningSetupLog;
 
   async function runSetup() {
+    const tokenInput = document.getElementById('hf-token-input');
+    const hfToken = tokenInput ? tokenInput.value.trim() : '';
+
     state.meaningEnvSetup  = true;
     state.meaningSetupLog  = ['Starting setup…'];
     state.meaningSetupError = null;
@@ -2625,7 +2684,8 @@ function renderMeaningSetup() {
       listen('setup-done', () => {
         cleanup();
         state.meaningEnvSetup = false;
-        state.meaningEnvReady = true;  // triggers model-loading screen on next render
+        state.meaningEnvReady = true;
+        state.meaningForceRedownload = false;
         render();
       }),
       listen('setup-error', e => {
@@ -2638,7 +2698,7 @@ function renderMeaningSetup() {
     ]);
 
     // Fire-and-forget — the command returns immediately; completion comes via events.
-    api.setupPythonEnv().catch(e => {
+    api.setupPythonEnv(hfToken, state.meaningForceRedownload).catch(e => {
       cleanup();
       state.meaningEnvSetup = false;
       state.meaningSetupError = String(e);
@@ -2651,12 +2711,27 @@ function renderMeaningSetup() {
     h('div', { class: 'meaning-setup-icon' }, icon('cpu')),
     h('h2', {}, 'Python Environment Required'),
     h('p', { class: 'meaning-setup-desc' },
-      'Meaning mode uses a local AI model (Qwen3-VL-2B-Instruct) to evaluate your answers. ',
+      'Meaning mode uses a local AI model (google/gemma-3-1b-it) to evaluate your answers. ',
       'A Python virtual environment named "EMO" will be created next to the database, ',
-      'and the model (~4 GB) will be downloaded.',
+      'and the model (~1 GB) will be downloaded.',
     ),
     !running
-      ? h('button', { class: 'btn-primary', onClick: runSetup }, icon('download'), ' Set Up Now')
+      ? h('div', { class: 'meaning-token-section' },
+          h('p', { class: 'meaning-token-label' },
+            'Gemma requires a ',
+            h('a', { href: 'https://huggingface.co/google/gemma-3-1b-it', target: '_blank' }, 'HuggingFace account'),
+            ' and an accepted license. Paste your ',
+            h('a', { href: 'https://huggingface.co/settings/tokens', target: '_blank' }, 'access token'),
+            ' below:',
+          ),
+          h('input', {
+            id: 'hf-token-input',
+            type: 'password',
+            class: 'hf-token-input',
+            placeholder: 'hf_…',
+          }),
+          h('button', { class: 'btn-primary', onClick: runSetup }, icon('download'), ' Set Up Now'),
+        )
       : null,
     log.length > 0
       ? h('div', { class: 'meaning-setup-log' },
@@ -2806,7 +2881,7 @@ function buildSidebar() {
         class: `nav-item${isActive ? ' active' : ''}`,
         'data-view': item.view,
         onClick: () => {
-          if (item.view === 'study') { state.studyStarted = false; state.studySelected = new Set(); }
+          if (item.view === 'study') { state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; }
           if (isPracticeItem) { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); }
           navigate(item.view);
         },

@@ -6,7 +6,7 @@ pub mod models;
 use commands::{
     add_card, delete_card, get_all_cards, get_due_cards, get_settings, get_stats,
     reset_card, review_card, keep_in_box1, save_settings, update_card, save_csv, move_card,
-    check_python_env, setup_python_env, start_meaning_eval, evaluate_meaning, stop_meaning_eval,
+    check_python_env, check_model_cached, setup_python_env, start_meaning_eval, evaluate_meaning, stop_meaning_eval,
 };
 use commands::{EvalStateInner, MeaningEvalState};
 use db::{init_db, DbState};
@@ -41,7 +41,7 @@ pub fn run() {
             get_all_cards, get_due_cards, add_card, update_card,
             delete_card, review_card, keep_in_box1, get_stats, reset_card,
             get_settings, save_settings, save_csv, move_card,
-            check_python_env, setup_python_env, start_meaning_eval,
+            check_python_env, check_model_cached, setup_python_env, start_meaning_eval,
             evaluate_meaning, stop_meaning_eval,
         ])
         .run(tauri::generate_context!())

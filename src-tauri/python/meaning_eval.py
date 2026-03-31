@@ -1,6 +1,6 @@
 """
 EMO Meaning Evaluator — persistent stdin/stdout process.
-Loads Qwen3-VL-2B-Instruct once, then evaluates user descriptions on demand.
+Loads google/gemma-3-1b-it once, then evaluates user descriptions on demand.
 Protocol: JSON lines in, JSON lines out.
   Input:  {"word": str, "description": str, "user_answer": str}
   Output: {"correct": bool, "feedback": str}
@@ -12,7 +12,7 @@ import sys
 import json
 import os
 
-MODEL_ID = "Qwen/Qwen3-VL-2B-Instruct"
+MODEL_ID = "google/gemma-3-1b-it"
 
 
 def get_device():
@@ -24,22 +24,32 @@ def get_device():
     return "cpu", torch.float32
 
 
+def _from_pretrained(cls, model_id, **kwargs):
+    """Load from local cache only. Model must be downloaded by first-time setup."""
+    try:
+        return cls.from_pretrained(model_id, local_files_only=True, **kwargs)
+    except OSError as e:
+        raise OSError(
+            f"Model '{model_id}' is not found in local cache. "
+            f"Please run first-time setup to download it.\n(Detail: {e})"
+        ) from e
+
+
 def load_model():
     import torch
-    from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     device, dtype = get_device()
-    processor = AutoProcessor.from_pretrained(MODEL_ID)
+    tokenizer = _from_pretrained(AutoTokenizer, MODEL_ID)
 
     if device == "cuda":
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            MODEL_ID,
-            torch_dtype=dtype,
-            device_map="auto",
+        model = _from_pretrained(
+            AutoModelForCausalLM, MODEL_ID,
+            torch_dtype=dtype, device_map="auto",
         )
     else:
-        model = Qwen3VLForConditionalGeneration.from_pretrained(
-            MODEL_ID,
+        model = _from_pretrained(
+            AutoModelForCausalLM, MODEL_ID,
             torch_dtype=dtype,
         )
         try:
@@ -48,7 +58,7 @@ def load_model():
             model = model.to("cpu")
 
     model.eval()
-    return model, processor
+    return model, tokenizer
 
 
 def build_prompt(word: str, description: str, user_answer: str) -> str:
@@ -66,28 +76,28 @@ def build_prompt(word: str, description: str, user_answer: str) -> str:
     )
 
 
-def evaluate(model, processor, word: str, description: str, user_answer: str) -> dict:
+def evaluate(model, tokenizer, word: str, description: str, user_answer: str) -> dict:
     import torch
 
     prompt = build_prompt(word, description, user_answer)
-    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    messages = [{"role": "user", "content": prompt}]
 
-    text = processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
-    )
-    inputs = processor(text=[text], return_tensors="pt").to(model.device)
+    inputs = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+    ).to(model.device)
 
     with torch.inference_mode():
         outputs = model.generate(
             **inputs,
             max_new_tokens=120,
             do_sample=False,
-            temperature=None,
-            top_p=None,
         )
 
-    generated_ids = [o[len(i):] for o, i in zip(outputs, inputs.input_ids)]
-    generated = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+    generated_ids = outputs[0][inputs["input_ids"].shape[-1]:]
+    generated = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
     first_line = generated.split("\n")[0].strip().upper()
     correct = first_line.startswith("CORRECT") and not first_line.startswith("INCORRECT")
@@ -97,9 +107,11 @@ def evaluate(model, processor, word: str, description: str, user_answer: str) ->
 def main():
     os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
     os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     try:
-        model, processor = load_model()
+        model, tokenizer = load_model()
     except Exception as e:
         print(json.dumps({"error": f"Failed to load model: {e}"}), flush=True)
         sys.exit(1)
@@ -113,7 +125,7 @@ def main():
         try:
             req = json.loads(raw)
             result = evaluate(
-                model, processor,
+                model, tokenizer,
                 req["word"],
                 req.get("description", ""),
                 req["user_answer"],

@@ -370,6 +370,30 @@ fn find_python3() -> Result<std::path::PathBuf, String> {
     Err("python3 not found. Please install Python 3 and try again.".into())
 }
 
+/// Returns true if the model snapshot directory exists and is non-empty.
+fn is_model_cached(model_id: &str) -> bool {
+    // HF stores models at $HF_HOME/hub/models--<org>--<name>/snapshots/<hash>/
+    let hf_home = std::env::var("HF_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_next::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".cache")
+                .join("huggingface")
+        });
+    let model_dir = hf_home
+        .join("hub")
+        .join(format!("models--{}", model_id.replace('/', "--")));
+    let snapshots = model_dir.join("snapshots");
+    let cached = snapshots.is_dir()
+        && fs::read_dir(&snapshots)
+            .ok()
+            .and_then(|mut d| d.next())
+            .is_some();
+    info!("is_model_cached({model_id}): {cached} (checked {})", snapshots.display());
+    cached
+}
+
 /// Returns true if the EMO venv exists and the transformers package is present.
 /// Uses filesystem checks only — no subprocess spawning — so it returns instantly.
 #[tauri::command]
@@ -400,6 +424,16 @@ pub fn check_python_env() -> bool {
     ready
 }
 
+/// Returns true if both the venv and the model cache are present.
+/// This is the single check the frontend uses to decide whether setup is needed.
+#[tauri::command]
+pub fn check_model_cached() -> bool {
+    let venv_ok = check_python_env();
+    let model_ok = is_model_cached("google/gemma-3-1b-it");
+    info!("check_model_cached: venv={venv_ok} model={model_ok}");
+    venv_ok && model_ok
+}
+
 /// Streams stdout and stderr from a child process concurrently, emitting each line
 /// as a "setup-log" event. stderr is drained in a background thread so neither
 /// pipe stalls waiting for the other to be read.
@@ -427,7 +461,7 @@ fn stream_child(proc: &mut std::process::Child, app: &tauri::AppHandle) {
     }
 }
 
-fn run_setup(app: &tauri::AppHandle) -> Result<(), String> {
+fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload: bool) -> Result<(), String> {
     let emit = |msg: &str| { app.emit("setup-log", msg.to_string()).ok(); };
 
     let data = emo_data_dir();
@@ -493,26 +527,38 @@ fn run_setup(app: &tauri::AppHandle) -> Result<(), String> {
     }
     info!("run_setup: pip install succeeded");
 
-    // 3. Pre-download the model weights — stream stdout + stderr concurrently
-    emit("[3/3] Downloading Qwen/Qwen3-VL-2B-Instruct…");
+    // 3. Pre-download the model weights (skip if already cached, unless forced)
+    if !force_redownload && is_model_cached("google/gemma-3-1b-it") {
+        info!("run_setup: model already cached, skipping download");
+        emit("[3/3] Model already downloaded, skipping.");
+        emit("Setup complete!");
+        return Ok(());
+    }
+    if force_redownload {
+        info!("run_setup: force_redownload=true, re-downloading model");
+        emit("[3/3] Re-downloading google/gemma-3-1b-it…");
+    } else {
+        emit("[3/3] Downloading google/gemma-3-1b-it…");
+    }
     info!("run_setup: starting model download");
     let dl_script = "\
-import sys
-from transformers import Qwen3VLForConditionalGeneration, AutoProcessor
-print('Downloading processor…', flush=True)
-AutoProcessor.from_pretrained('Qwen/Qwen3-VL-2B-Instruct')
+from transformers import AutoModelForCausalLM, AutoTokenizer
+print('Downloading tokenizer…', flush=True)
+AutoTokenizer.from_pretrained('google/gemma-3-1b-it')
 print('Downloading model weights…', flush=True)
-Qwen3VLForConditionalGeneration.from_pretrained('Qwen/Qwen3-VL-2B-Instruct')
+AutoModelForCausalLM.from_pretrained('google/gemma-3-1b-it')
 print('Download complete.', flush=True)
 ";
 
-    let mut proc = Command::new(&python)
-        .args(["-u", "-c", dl_script])
+    let mut cmd = Command::new(&python);
+    cmd.args(["-u", "-c", dl_script])
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped());
+    if let Some(ref token) = hf_token {
+        cmd.env("HF_TOKEN", token);
+    }
+    let mut proc = cmd.spawn().map_err(|e| e.to_string())?;
 
     stream_child(&mut proc, app);
 
@@ -531,10 +577,10 @@ print('Download complete.', flush=True)
 /// Listen for "setup-log" events for progress, "setup-done" on success,
 /// and "setup-error" on failure.
 #[tauri::command]
-pub fn setup_python_env(app: tauri::AppHandle) -> Result<(), String> {
+pub fn setup_python_env(app: tauri::AppHandle, hf_token: Option<String>, force_redownload: bool) -> Result<(), String> {
     info!("setup_python_env: spawning setup thread");
     std::thread::spawn(move || {
-        match run_setup(&app) {
+        match run_setup(&app, hf_token, force_redownload) {
             Ok(()) => {
                 info!("setup_python_env: setup completed successfully");
                 app.emit("setup-done", ()).ok();
