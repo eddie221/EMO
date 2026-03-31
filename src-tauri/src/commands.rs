@@ -321,8 +321,17 @@ pub fn save_csv(csv: String, filename: String) -> Result<String, String> {
 
 // ── Meaning mode: Python env + eval process ───────────────────────────────────
 
-const MEANING_EVAL_PY: &str  = include_str!("../python/meaning_eval.py");
-const REQUIREMENTS_TXT: &str = include_str!("../python/requirements.txt");
+const MEANING_EVAL_PY: &str = include_str!("../python/meaning_eval.py");
+
+// Packages passed directly to pip — keeps requirements.txt out of the runtime data dir.
+const PIP_PACKAGES: &[&str] = &[
+    "transformers>=4.50.0",
+    "torch>=2.1.0,<3.0.0",
+    "accelerate>=0.26.0",
+    "sentencepiece",
+    "protobuf",
+    "torchvision",
+];
 
 fn emo_data_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
@@ -338,36 +347,76 @@ fn python_bin(venv: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
-/// Finds a working python3 executable.
+/// Returns (major, minor) for a Python executable, or None if it can't be determined.
+fn python_version(path: &std::path::Path) -> Option<(u32, u32)> {
+    let out = Command::new(path)
+        .args(["-c", "import sys; print(sys.version_info.major, sys.version_info.minor)"])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let mut parts = s.split_whitespace();
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Returns true if the Python version is compatible with PyTorch (3.9 – 3.13).
+fn python_version_ok(major: u32, minor: u32) -> bool {
+    major == 3 && minor >= 9 && minor <= 13
+}
+
+/// Finds a working python3 executable compatible with PyTorch (3.9–3.13).
 /// GUI apps on macOS/Linux don't inherit the shell PATH, so $PATH-based lookup
 /// misses Homebrew (/opt/homebrew/bin, /usr/local/bin) and pyenv installs.
 fn find_python3() -> Result<std::path::PathBuf, String> {
     let candidates: &[&str] = if cfg!(target_os = "windows") {
-        &["python", "python3"]
+        &["python3.13", "python3.12", "python3.11", "python3.10", "python3.9", "python3", "python"]
     } else {
         &[
-            "/opt/homebrew/bin/python3",   // Apple Silicon Homebrew
-            "/usr/local/bin/python3",       // Intel Homebrew / common Linux
-            "/usr/bin/python3",             // system Python
-            "python3",                      // fallback: whatever is in PATH
+            // Versioned Homebrew binaries — prefer newer-but-compatible
+            "/opt/homebrew/bin/python3.13",
+            "/opt/homebrew/bin/python3.12",
+            "/opt/homebrew/bin/python3.11",
+            "/usr/local/bin/python3.13",
+            "/usr/local/bin/python3.12",
+            "/usr/local/bin/python3.11",
+            // Unversioned symlinks (may point to 3.14+ on bleeding-edge systems)
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+            "python3",
         ]
     };
 
+    let mut incompatible: Option<(std::path::PathBuf, u32, u32)> = None;
+
     for candidate in candidates {
         let path = std::path::PathBuf::from(candidate);
-        let ok = Command::new(&path)
-            .args(["--version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if ok {
-            info!("find_python3: found {}", path.display());
-            return Ok(path);
+        if let Some((major, minor)) = python_version(&path) {
+            if python_version_ok(major, minor) {
+                info!("find_python3: using {candidate} (Python {major}.{minor})");
+                return Ok(path);
+            }
+            debug!("find_python3: {candidate} is Python {major}.{minor} — incompatible with PyTorch");
+            if incompatible.is_none() {
+                incompatible = Some((path, major, minor));
+            }
+        } else {
+            debug!("find_python3: not found at {candidate}");
         }
-        debug!("find_python3: not found at {candidate}");
     }
-    error!("find_python3: python3 not found in any candidate location");
-    Err("python3 not found. Please install Python 3 and try again.".into())
+
+    if let Some((_, major, minor)) = incompatible {
+        error!("find_python3: only found Python {major}.{minor}, which is not supported by PyTorch");
+        Err(format!(
+            "Python {major}.{minor} is not supported by PyTorch (requires 3.9–3.13). \
+             Please install Python 3.12 via Homebrew: brew install python@3.12"
+        ))
+    } else {
+        error!("find_python3: python3 not found in any candidate location");
+        Err("Python 3 not found. Please install Python 3.12 via Homebrew: brew install python@3.12".into())
+    }
 }
 
 /// Returns true if the model snapshot directory exists and is non-empty.
@@ -468,11 +517,6 @@ fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload:
     info!("run_setup: data dir = {}", data.display());
     fs::create_dir_all(&data).map_err(|e| e.to_string())?;
 
-    let py_dir = data.join("python");
-    fs::create_dir_all(&py_dir).map_err(|e| e.to_string())?;
-    fs::write(py_dir.join("meaning_eval.py"),  MEANING_EVAL_PY).map_err(|e| e.to_string())?;
-    fs::write(py_dir.join("requirements.txt"), REQUIREMENTS_TXT).map_err(|e| e.to_string())?;
-
     let venv = data.join("EMO");
 
     // 1. Create venv (skip if already exists)
@@ -504,15 +548,13 @@ fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload:
         venv.join("bin").join("pip3")
     };
 
-    // 2. Install requirements — stream stdout + stderr concurrently
+    // 2. Install packages inline — no requirements.txt file needed at runtime
     emit("[2/3] Installing Python packages…");
-    info!("run_setup: running pip install from {}", pip.display());
+    info!("run_setup: running pip install");
+    let mut pip_args = vec!["install", "--progress-bar", "on"];
+    pip_args.extend(PIP_PACKAGES.iter().copied());
     let mut proc = Command::new(&pip)
-        .args([
-            "install",
-            "--progress-bar", "on",
-            "-r", py_dir.join("requirements.txt").to_str().unwrap(),
-        ])
+        .args(&pip_args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -600,8 +642,11 @@ fn spawn_eval_process(app: &tauri::AppHandle) -> Result<EvalHandle, String> {
     let data   = emo_data_dir();
     let venv   = data.join("EMO");
     let python = python_bin(&venv);
-    let script = data.join("python").join("meaning_eval.py");
+    let script = data.join("meaning_eval.py");
 
+    // Always write the embedded script so it exists on a fresh install and
+    // stays up to date after app upgrades.
+    fs::write(&script, MEANING_EVAL_PY).map_err(|e| format!("Failed to write eval script: {e}"))?;
     info!("spawn_eval_process: starting {} {}", python.display(), script.display());
 
     let mut child = Command::new(&python)

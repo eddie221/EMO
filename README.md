@@ -19,7 +19,11 @@ Meaning mode uses [google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1
 
 Because Gemma requires accepting a license agreement, a HuggingFace account and access token are needed for the initial download only.
 
-### Steps
+### Requirements
+
+- **Python 3.9–3.13** — PyTorch does not yet support Python 3.14+. If your system Python is 3.14 or newer, install a compatible version first.
+
+### LLM Authorization Steps
 
 1. **Accept the license** — visit [huggingface.co/google/gemma-3-1b-it](https://huggingface.co/google/gemma-3-1b-it) and click *Agree and access repository*.
 
