@@ -697,7 +697,7 @@ function renderStudyCard() {
       buildFlashcard(item, bInfo),
       buildAnswerSection(item),
       !state.studyFlipped
-        ? h('p', { class: 'flip-prompt' }, 'Click the card to see the answer')
+        ? h('p', { class: 'flip-prompt' }, 'Click the card or press ', h('kbd', { class: 'key-hint' }, 'Space'), ' to see the answer')
         : h('span', {}),
     ),
 
@@ -712,7 +712,7 @@ function renderStudyCard() {
             render();
           }
         },
-      }, icon('arrow-left'), ' Back'),
+      }, icon('arrow-left'), ' Back ', h('kbd', { class: 'key-hint' }, '←')),
       (() => {
         const btn = h('button', { class: 'nav-btn keep-box1-btn' }, icon('pin-angle'), ' Keep in Box 1');
         btn.addEventListener('click', async () => {
@@ -747,7 +747,7 @@ function renderStudyCard() {
             render();
           }
         },
-      }, 'Next ', icon('arrow-right')),
+      }, h('kbd', { class: 'key-hint' }, '→'), ' Next ', icon('arrow-right')),
     ),
 
     // meta bar
@@ -842,10 +842,12 @@ function buildAnswerSection(_card) {
     h('button', { class: 'answer-btn wrong', onClick: () => doReview(false) },
       h('span', { class: 'answer-icon' }, icon('x-lg')),
       h('span', {}, 'Again'),
+      h('kbd', { class: 'key-hint' }, 'W'),
     ),
     h('button', { class: 'answer-btn correct', onClick: () => doReview(true) },
       h('span', { class: 'answer-icon' }, icon('check-lg')),
       h('span', {}, 'Got it'),
+      h('kbd', { class: 'key-hint' }, 'C'),
     ),
   );
 }
@@ -2227,7 +2229,7 @@ function renderPracticeCard() {
       buildPracticeFlashcard(card, bInfo),
       buildPracticeAnswerSection(),
       !state.practiceFlipped
-        ? h('p', { class: 'flip-prompt' }, 'Click the card to see the answer')
+        ? h('p', { class: 'flip-prompt' }, 'Click the card or press ', h('kbd', { class: 'key-hint' }, 'Space'), ' to see the answer')
         : h('span', {}),
     ),
 
@@ -2241,7 +2243,7 @@ function renderPracticeCard() {
             render();
           }
         },
-      }, icon('arrow-left'), ' Back'),
+      }, icon('arrow-left'), ' Back ', h('kbd', { class: 'key-hint' }, '←')),
       h('button', {
         class: `nav-btn${state.practiceIdx >= total - 1 ? ' disabled' : ''}`,
         onClick: () => {
@@ -2251,7 +2253,7 @@ function renderPracticeCard() {
             render();
           }
         },
-      }, 'Next ', icon('arrow-right')),
+      }, h('kbd', { class: 'key-hint' }, '→'), ' Next ', icon('arrow-right')),
     ),
 
     (() => {
@@ -2327,10 +2329,12 @@ function buildPracticeAnswerSection() {
     h('button', { class: 'answer-btn wrong',   onClick: () => doPractice(false) },
       h('span', { class: 'answer-icon' }, icon('x-lg')),
       h('span', {}, 'Again'),
+      h('kbd', { class: 'key-hint' }, 'W'),
     ),
     h('button', { class: 'answer-btn correct', onClick: () => doPractice(true) },
       h('span', { class: 'answer-icon' }, icon('check-lg')),
       h('span', {}, 'Got it'),
+      h('kbd', { class: 'key-hint' }, 'C'),
     ),
   );
 }
@@ -2915,6 +2919,94 @@ function buildSidebar() {
   return sidebar;
 }
 
+// ── Keyboard navigation ────────────────────────────────────────────────────────
+function handleKeyNav(e) {
+  // Never intercept when focus is inside a text input / textarea
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+  // ── Practice card ──
+  if (state.view === 'practice' && !state.practiceDone) {
+    const total = state.practiceQueue.length;
+
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (!state.practiceAnimating && state.practiceIdx > 0) {
+        state.practiceIdx--;
+        state.practiceFlipped = false;
+        render();
+      }
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (!state.practiceAnimating && state.practiceIdx < total - 1) {
+        state.practiceIdx++;
+        state.practiceFlipped = false;
+        render();
+      }
+      return;
+    }
+    if (e.key === ' ' && state.practiceMode === 'flip') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      state.practiceFlipped = !state.practiceFlipped;
+      render();
+      return;
+    }
+    if (e.key === 'c' && state.practiceMode === 'flip' && state.practiceFlipped) {
+      e.preventDefault();
+      doPractice(true);
+      return;
+    }
+    if (e.key === 'w' && state.practiceMode === 'flip' && state.practiceFlipped) {
+      e.preventDefault();
+      doPractice(false);
+      return;
+    }
+  }
+
+  // ── Study card ──
+  if (state.view === 'study' && state.studyStarted && !state.studyDone) {
+    const total = state.studyQueue.length;
+
+    if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      if (!state.studyAnimating && state.studyIdx > 0) {
+        state.studyIdx--;
+        state.studyFlipped = false;
+        render();
+      }
+      return;
+    }
+    if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      if (!state.studyAnimating && state.studyIdx < total - 1) {
+        state.studyIdx++;
+        state.studyFlipped = false;
+        render();
+      }
+      return;
+    }
+    if (e.key === ' ' && !state.studyFlipped) {
+      e.preventDefault();
+      state.studyFlipped = true;
+      render();
+      return;
+    }
+    if (e.key === 'c' && state.studyFlipped) {
+      e.preventDefault();
+      doReview(true);
+      return;
+    }
+    if (e.key === 'w' && state.studyFlipped) {
+      e.preventDefault();
+      doReview(false);
+      return;
+    }
+  }
+}
+
 // ── Boot ───────────────────────────────────────────────────────────────────────
 async function boot() {
   try {
@@ -2932,6 +3024,7 @@ async function boot() {
   );
 
   app.appendChild(shell);
+  document.addEventListener('keydown', handleKeyNav);
 
   render();
 }
