@@ -58,7 +58,8 @@ const state = {
   // study
   studySort: 'due',
   studySelected: new Set(),
-  studyFilterBox: null,
+  studyFilterBox: new Set(),
+  box6DailyCards: [],
   studyStarted: false,
   studyPageSize: 25,
   studyPage: 0,
@@ -321,7 +322,7 @@ function renderDashboard() {
             })()
           : null,
         due > 0
-          ? h('button', { class: 'btn-primary', onClick: () => { state.studyIsBox6 = false; state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; navigate('study'); } },
+          ? h('button', { class: 'btn-primary', onClick: () => { state.studyIsBox6 = false; state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = new Set(); state.box6DailyCards = []; navigate('study'); } },
               icon('book'), ` Study ${due} card${due !== 1 ? 's' : ''} due`)
           : null,
       ),
@@ -428,8 +429,22 @@ function renderStudy() {
 }
 
 function renderStudySelect() {
-  const allDue     = applySort(state.dueCards, state.studySort);
-  const due        = state.studyFilterBox === null ? allDue : allDue.filter(c => c.box_number === state.studyFilterBox);
+  const allDue = applySort(state.dueCards, state.studySort);
+
+  // Multi-select box filter: empty set = All (normal due cards only)
+  const filterBoxes   = state.studyFilterBox;
+  const filterHasBox6 = filterBoxes.has(6);
+  const filterRegular = new Set([...filterBoxes].filter(b => b !== 6));
+
+  let due;
+  if (filterBoxes.size === 0) {
+    due = allDue;
+  } else {
+    const regular = filterRegular.size > 0 ? allDue.filter(c => filterRegular.has(c.box_number)) : [];
+    const box6    = filterHasBox6 ? applySort(state.box6DailyCards, state.studySort) : [];
+    due = [...regular, ...box6];
+  }
+
   const selCount   = state.studySelected.size;
   const allSel     = due.length > 0 && due.every(c => state.studySelected.has(c.id));
   const pageSize   = state.studyPageSize === 0 ? due.length : state.studyPageSize;
@@ -440,7 +455,8 @@ function renderStudySelect() {
   function startStudy() {
     const cards = due.filter(c => state.studySelected.has(c.id));
     if (!cards.length) return;
-    state.studyIsBox6 = false;
+    // Box 6 session badge: only if all selected cards are from box 6
+    state.studyIsBox6 = cards.every(c => c.box_number === 6);
     initStudy(cards);
     render();
   }
@@ -451,10 +467,10 @@ function renderStudySelect() {
         h('h1', { class: 'page-title' }, 'Study'),
         h('p',  { class: 'page-subtitle' },
           selCount > 0
-            ? `${selCount} card${selCount !== 1 ? 's' : ''} selected · ${due.length} due today`
-            : state.studyFilterBox !== null
-              ? `${due.length} of ${allDue.length} due today (Box ${state.studyFilterBox})`
-              : `${due.length} card${due.length !== 1 ? 's' : ''} due today`),
+            ? `${selCount} card${selCount !== 1 ? 's' : ''} selected · ${due.length} available`
+            : filterBoxes.size > 0
+              ? `${due.length} card${due.length !== 1 ? 's' : ''} (${[...filterBoxes].map(b => `Box ${b}`).join(', ')})`
+              : `${allDue.length} card${allDue.length !== 1 ? 's' : ''} due today`),
       ),
       h('div', { class: 'practice-header-actions' },
         h('div', { class: 'practice-header-row1' },
@@ -531,17 +547,33 @@ function renderStudySelect() {
         h('span', { class: 'filter-label' }, 'Box'),
         h('div', { class: 'filter-group' },
           (() => {
-            const b = h('button', { class: `filter-chip${state.studyFilterBox === null ? ' active' : ''}` }, 'All');
-            b.addEventListener('click', () => { state.studyFilterBox = null; state.studyPage = 0; render(); });
+            const b = h('button', { class: `filter-chip${filterBoxes.size === 0 ? ' active' : ''}` }, 'All');
+            b.addEventListener('click', () => { state.studyFilterBox = new Set(); state.box6DailyCards = []; state.studyPage = 0; render(); });
             return b;
           })(),
           ...getBoxes().map(box => {
-            const active = state.studyFilterBox === box.box;
-            const count  = allDue.filter(c => c.box_number === box.box).length;
-            const b = h('button', { class: `filter-chip${active ? ' active' : ''}` }, `Box ${box.box} (${count})`);
+            const isBox6  = box.box === 6;
+            const active  = filterBoxes.has(box.box);
+            const count   = isBox6
+              ? (active ? state.box6DailyCards.length : (state.stats?.box_counts?.[5] ?? 0))
+              : allDue.filter(c => c.box_number === box.box).length;
+            const label   = isBox6
+              ? `Box 6 ${active ? `(${count} picks)` : `(${count})`}`
+              : `Box ${box.box} (${count})`;
+            const b = h('button', { class: `filter-chip${active ? ' active' : ''}` }, label);
             if (active) b.style.setProperty('--box-clr', box.color);
-            b.addEventListener('click', () => {
-              state.studyFilterBox = active ? null : box.box;
+            b.addEventListener('click', async () => {
+              if (active) {
+                filterBoxes.delete(box.box);
+                if (isBox6) state.box6DailyCards = [];
+              } else {
+                filterBoxes.add(box.box);
+                if (isBox6) {
+                  // Fetch today's picks when box 6 filter is activated
+                  const picks = await api.getBox6Daily();
+                  state.box6DailyCards = picks;
+                }
+              }
               state.studyPage = 0;
               render();
             });
@@ -565,8 +597,10 @@ function renderStudySelect() {
     due.length === 0
       ? h('div', { class: 'study-done' },
           h('div', { class: 'done-icon' }, icon('stars')),
-          h('h2', {}, 'Nothing due right now'),
-          h('p',  {}, 'All cards are scheduled for later. Check back soon!'),
+          h('h2', {}, filterHasBox6 && filterRegular.size === 0 ? 'No Box 6 cards today' : 'Nothing due right now'),
+          h('p',  {}, filterHasBox6 && filterRegular.size === 0
+            ? 'No cards in Box 6 yet. Cards graduate here after mastering Box 5.'
+            : 'All cards are scheduled for later. Check back soon!'),
           h('button', { class: 'btn-primary', onClick: () => navigate('dashboard') }, 'Back to Overview'),
         )
       : h('div', {},
@@ -2954,7 +2988,7 @@ function buildSidebar() {
         class: `nav-item${isActive ? ' active' : ''}`,
         'data-view': item.view,
         onClick: () => {
-          if (item.view === 'study') { state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; }
+          if (item.view === 'study') { state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = new Set(); state.box6DailyCards = []; }
           if (isPracticeItem) { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); }
           navigate(item.view);
         },
