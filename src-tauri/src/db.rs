@@ -34,6 +34,7 @@ pub fn init_db(conn: &Connection) -> SqlResult<()> {
             value TEXT NOT NULL
         );
         INSERT OR IGNORE INTO settings (key, value) VALUES ('box_days', '1,3,7,14,30');
+        INSERT OR IGNORE INTO settings (key, value) VALUES ('box6_count', '5');
     ")?;
     Ok(())
 }

@@ -10,7 +10,8 @@ use std::sync::{mpsc, Mutex};
 
 use crate::db::DbState;
 use crate::helpers::{next_review_date, parse_box_days, row_to_card, SELECT_ALL};
-use crate::models::{CreateFlashcard, EvalResult, Flashcard, ReviewResult, Stats};
+use crate::models::{AppSettings, CreateFlashcard, EvalResult, Flashcard, ReviewResult, Stats};
+use rand::Rng;
 
 // ── Meaning eval process state ────────────────────────────────────────────────
 //
@@ -57,13 +58,23 @@ fn load_box_days(conn: &rusqlite::Connection) -> Vec<i64> {
 // ── Commands ─────────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn get_settings(state: State<DbState>) -> Result<Vec<i64>, String> {
+pub fn get_settings(state: State<DbState>) -> Result<AppSettings, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(load_box_days(&conn))
+    let box_days = load_box_days(&conn);
+    let box6_count: i64 = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key='box6_count'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5);
+    Ok(AppSettings { box_days, box6_count })
 }
 
 #[tauri::command]
-pub fn save_settings(state: State<DbState>, box_days: Vec<i64>) -> Result<(), String> {
+pub fn save_settings(state: State<DbState>, box_days: Vec<i64>, box6_count: i64) -> Result<(), String> {
     if box_days.len() != 5 {
         return Err("box_days must have exactly 5 values".into());
     }
@@ -76,15 +87,22 @@ pub fn save_settings(state: State<DbState>, box_days: Vec<i64>) -> Result<(), St
             ));
         }
     }
-    // enforce minimum of 1 day for box 1
     if box_days[0] < 1 {
         return Err("Box 1 interval must be at least 1 day".into());
+    }
+    if box6_count < 1 {
+        return Err("Box 6 daily count must be at least 1".into());
     }
     let raw = box_days.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(",");
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES ('box_days', ?1)",
         params![raw],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('box6_count', ?1)",
+        params![box6_count.to_string()],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -120,7 +138,7 @@ pub fn add_card(state: State<DbState>, card: CreateFlashcard) -> Result<Flashcar
     let box_days = load_box_days(&conn);
     let id = Uuid::new_v4().to_string();
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let box_num = card.box_number.unwrap_or(1).clamp(1, 5);
+    let box_num = card.box_number.unwrap_or(1).clamp(1, 6);
     let next_review = next_review_date(box_num, &box_days);
     conn.execute(
         "INSERT INTO flashcards
@@ -195,7 +213,9 @@ pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashc
         )
         .map_err(|e| e.to_string())?;
 
-    let new_box = if result.correct { (current_box + 1).min(5) } else { 1 };
+    // Correct in box 5 → promotes to box 6. Correct in box 6 → stays in box 6.
+    // Wrong from any box (including 6) → back to box 1.
+    let new_box = if result.correct { (current_box + 1).min(6) } else { 1 };
     let next_review = next_review_date(new_box, &box_days);
     let new_total   = total_reviews + 1;
     let new_correct = if result.correct { correct_reviews + 1 } else { correct_reviews };
@@ -254,7 +274,7 @@ pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
         .query_row("SELECT COUNT(*) FROM flashcards", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     let mut box_counts = Vec::new();
-    for b in 1..=5 {
+    for b in 1..=6 {
         let count: i32 = conn
             .query_row(
                 "SELECT COUNT(*) FROM flashcards WHERE box_number=?1",
@@ -281,6 +301,70 @@ pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
     Ok(Stats { total_cards, box_counts, cards_due_today, total_reviews, correct_reviews })
 }
 
+/// Return a weighted-random sample of Box 6 cards for today's daily review.
+/// Weight = 1.1 − accuracy, so higher-accuracy cards are less likely to appear.
+/// Uses the Efraimidis–Spirakis algorithm (weighted reservoir) for correct
+/// without-replacement sampling.
+#[tauri::command]
+pub fn get_box6_daily(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    let count: i64 = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key='box6_count'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5)
+        .max(1);
+
+    let mut stmt = conn
+        .prepare(&format!("{} WHERE box_number=6", SELECT_ALL))
+        .map_err(|e| e.to_string())?;
+    let all: Vec<Flashcard> = stmt
+        .query_map([], |row| row_to_card(row))
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if all.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // weight = 1.1 − accuracy  (range 0.1 … 1.1)
+    // Cards never reviewed get accuracy = 0.5 (neutral).
+    let weights: Vec<f64> = all
+        .iter()
+        .map(|c| {
+            let acc = if c.total_reviews > 0 {
+                c.correct_reviews as f64 / c.total_reviews as f64
+            } else {
+                0.5
+            };
+            1.1 - acc
+        })
+        .collect();
+
+    // Efraimidis-Spirakis: key = -ln(U) / w; pick the n smallest keys.
+    let mut rng = rand::thread_rng();
+    let n = (count as usize).min(all.len());
+
+    let mut keyed: Vec<(f64, usize)> = weights
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let u: f64 = rng.gen_range(f64::EPSILON..1.0);
+            (-u.ln() / w, i)
+        })
+        .collect();
+
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let result = keyed.into_iter().take(n).map(|(_, i)| all[i].clone()).collect();
+    Ok(result)
+}
+
 #[tauri::command]
 pub fn reset_card(state: State<DbState>, id: String) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -298,7 +382,7 @@ pub fn reset_card(state: State<DbState>, id: String) -> Result<(), String> {
 pub fn move_card(state: State<DbState>, id: String, box_number: i32) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
-    let box_num = box_number.clamp(1, 5);
+    let box_num = box_number.clamp(1, 6);
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let next_review = next_review_date(box_num, &box_days);
     conn.execute(

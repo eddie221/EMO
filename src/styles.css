@@ -65,6 +65,8 @@ input,select,textarea { font-family:inherit; }
 .btn-primary:disabled { opacity:.5; cursor:not-allowed; transform:none; }
 .btn-ghost { display:inline-flex; align-items:center; gap:8px; padding:10px 20px; border:1px solid var(--border-2); color:var(--text-2); font-size:13.5px; border-radius:var(--r); transition:all var(--ease); }
 .btn-ghost:hover { border-color:var(--text-2); color:var(--text); }
+.btn-box6 { border-color:color-mix(in srgb,#a45de8 40%,transparent); color:#a45de8; }
+.btn-box6:hover { border-color:#a45de8; color:#a45de8; background:color-mix(in srgb,#a45de8 8%,transparent); }
 .btn-select { display:inline-flex; align-items:center; gap:7px; padding:9px 16px; border:1.5px dashed var(--border-2); color:var(--text-2); font-size:13px; border-radius:var(--r); background:none; cursor:pointer; transition:all var(--ease); }
 .btn-select:hover { border-color:var(--text-3); border-style:solid; color:var(--text); }
 .btn-select.active { border-style:solid; border-color:color-mix(in srgb,#f87171 45%,transparent); background:color-mix(in srgb,#f87171 8%,transparent); color:#f87171; }

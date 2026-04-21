@@ -23,6 +23,10 @@ pub fn parse_box_days(raw: &str) -> Vec<i64> {
 /// resolved interval list. Dates are anchored to midnight local time so cards
 /// become due at the start of the calendar day in the system's timezone.
 pub fn next_review_date(box_number: i32, box_days: &[i64]) -> String {
+    // Box 6 cards are picked daily by weighted lottery — never due in the normal queue.
+    if box_number == 6 {
+        return "9999-12-31T00:00:00".to_string();
+    }
     let now_local = Local::now();
     let days = if box_number == 1 {
         0

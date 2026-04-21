@@ -2,7 +2,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const BOX_COLORS = ['#e85d5d','#e8945d','#e8c85d','#8ad65d','#5db8e8'];
+const BOX_COLORS = ['#e85d5d','#e8945d','#e8c85d','#8ad65d','#5db8e8','#a45de8'];
 
 function dayLabel(d) {
   if (d === 1)  return 'Daily';
@@ -13,9 +13,11 @@ function dayLabel(d) {
 }
 
 function getBoxes() {
-  return state.boxDays.map((days, i) => ({
+  const boxes = state.boxDays.map((days, i) => ({
     box: i + 1, days, color: BOX_COLORS[i], label: dayLabel(days),
   }));
+  boxes.push({ box: 6, days: null, color: BOX_COLORS[5], label: 'Daily lottery' });
+  return boxes;
 }
 
 
@@ -24,7 +26,8 @@ const BOX_DESCS = [
   'Review every 3 days',
   'Review weekly',
   'Review biweekly',
-  'Mastered cards',
+  'Near-mastered cards',
+  'Daily weighted review',
 ];
 
 const PARTS_OF_SPEECH = [
@@ -86,6 +89,9 @@ const state = {
   libPage: 0,
   // settings
   boxDays: [1, 3, 7, 14, 30],
+  box6Count: 5,
+  // box 6 study
+  studyIsBox6: false,
   // practice
   practiceSort: 'az',
   practiceSelected: new Set(),
@@ -135,8 +141,9 @@ const api = {
   stopMeaningEval:  ()                             => invoke('stop_meaning_eval'),
   resetCard:    (id)         => invoke('reset_card',    { id }),
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
-  getSettings:  ()           => invoke('get_settings'),
-  saveSettings: (box_days)   => invoke('save_settings', { boxDays: box_days }),
+  getSettings:  ()                         => invoke('get_settings'),
+  saveSettings: (box_days, box6_count)     => invoke('save_settings', { boxDays: box_days, box6Count: box6_count }),
+  getBox6Daily: ()                         => invoke('get_box6_daily'),
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -159,7 +166,7 @@ function h(tag, attrs = {}, ...children) {
 
 function el(selector) { return document.querySelector(selector); }
 
-function boxColor(n) { return getBoxes()[n - 1]?.color ?? '#c8a96e'; }
+function boxColor(n) { return BOX_COLORS[n - 1] ?? '#c8a96e'; }
 
 const POS_CLR  = { noun:'#5db8e8', verb:'#e8c85d', adjective:'#6dd68a', adverb:'#c8a96e', idiom:'#e85d5d' };
 const FREQ_CLR = { 'very common':'#6dd68a', 'common':'#5db8e8', 'uncommon':'#e8c85d', 'rare':'#c8a96e', 'archaic':'#e85d5d' };
@@ -219,10 +226,10 @@ function localNowString() {
 function computeDerived() {
   const now = localNowString();
   state.dueCards = state.cards.filter(c => c.next_review <= now);
-  const boxCounts = [0, 0, 0, 0, 0];
+  const boxCounts = [0, 0, 0, 0, 0, 0];
   let totalReviews = 0, correctReviews = 0;
   for (const c of state.cards) {
-    if (c.box_number >= 1 && c.box_number <= 5) boxCounts[c.box_number - 1]++;
+    if (c.box_number >= 1 && c.box_number <= 6) boxCounts[c.box_number - 1]++;
     totalReviews   += c.total_reviews   ?? 0;
     correctReviews += c.correct_reviews ?? 0;
   }
@@ -237,9 +244,10 @@ function computeDerived() {
 
 // Full refresh: used only at boot (needs settings too)
 async function refresh() {
-  const [cards, boxDays] = await Promise.all([api.getAllCards(), api.getSettings()]);
-  state.cards   = cards;
-  state.boxDays = boxDays;
+  const [cards, settings] = await Promise.all([api.getAllCards(), api.getSettings()]);
+  state.cards    = cards;
+  state.boxDays  = settings.box_days;
+  state.box6Count = settings.box6_count;
   computeDerived();
 }
 
@@ -299,8 +307,21 @@ function renderDashboard() {
         state.cards.length > 0
           ? h('button', { class: 'btn-ghost', onClick: () => { state.practiceSelected = new Set(); state.practiceSearch = ''; state.practiceFilterBox = null; state.practiceFilterPos = new Set(); navigate('practice-select'); } }, icon('record-circle'), ' Practice')
           : null,
+        (s?.box_counts?.[5] ?? 0) > 0
+          ? (() => {
+              const btn = h('button', { class: 'btn-ghost btn-box6' }, icon('stars'), ` Box 6 (${s.box_counts[5]})`);
+              btn.addEventListener('click', async () => {
+                const cards = await api.getBox6Daily();
+                if (!cards.length) { showToast('No Box 6 cards available', 'info'); return; }
+                state.studyIsBox6 = true;
+                initStudy(cards);
+                navigate('study');
+              });
+              return btn;
+            })()
+          : null,
         due > 0
-          ? h('button', { class: 'btn-primary', onClick: () => { state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; navigate('study'); } },
+          ? h('button', { class: 'btn-primary', onClick: () => { state.studyIsBox6 = false; state.studyStarted = false; state.studySelected = new Set(); state.studyFilterBox = null; navigate('study'); } },
               icon('book'), ` Study ${due} card${due !== 1 ? 's' : ''} due`)
           : null,
       ),
@@ -316,7 +337,7 @@ function renderDashboard() {
 
     // boxes
     h('div', { class: 'section' },
-      h('h2', { class: 'section-title' }, 'The Five Boxes'),
+      h('h2', { class: 'section-title' }, 'The Six Boxes'),
       h('div', { class: 'boxes-grid' },
         ...getBoxes().map((b, i) => {
           const count = s?.box_counts[i] ?? 0;
@@ -419,6 +440,7 @@ function renderStudySelect() {
   function startStudy() {
     const cards = due.filter(c => state.studySelected.has(c.id));
     if (!cards.length) return;
+    state.studyIsBox6 = false;
     initStudy(cards);
     render();
   }
@@ -441,6 +463,20 @@ function renderStudySelect() {
             disabled: selCount === 0,
             onClick: selCount > 0 ? startStudy : null,
           }, icon('book'), selCount > 0 ? ` Study (${selCount})` : ' Study'),
+          (() => {
+            const box6Cards = state.cards.filter(c => c.box_number === 6);
+            if (!box6Cards.length) return null;
+            const btn = h('button', { class: 'btn-ghost btn-sm btn-box6' },
+              icon('stars'), ` Box 6 (${box6Cards.length})`);
+            btn.addEventListener('click', async () => {
+              const cards = await api.getBox6Daily();
+              if (!cards.length) { showToast('No Box 6 cards available', 'info'); return; }
+              state.studyIsBox6 = true;
+              initStudy(cards);
+              render();
+            });
+            return btn;
+          })(),
         ),
         h('div', { class: 'practice-header-row2' },
           h('button', { class: 'btn-ghost btn-sm', onClick: () => {
@@ -684,6 +720,10 @@ function renderStudyCard() {
 
     // direction badge
     h('div', { class: 'study-direction' },
+      state.studyIsBox6
+        ? h('span', { class: 'dir-badge', style: { color: BOX_COLORS[5], borderColor: 'color-mix(in srgb,#a45de8 35%,transparent)', background: 'color-mix(in srgb,#a45de8 8%,transparent)' } },
+            icon('stars'), ' Box 6 Daily Review')
+        : null,
       h('span', { class: `dir-badge${item.reversed ? ' dir-reverse' : ''}` },
         item.reversed ? h('span', {}, icon('arrow-return-left'), ' Recall the word') : h('span', {}, icon('arrow-right'), ' Recall the translation'),
       ),
@@ -2754,6 +2794,7 @@ function renderSettings() {
   // local draft — copy so we don't mutate state until Save
   const draft = [...state.boxDays];
   const errMsgs = ['', '', '', '', ''];
+  let draftBox6Count = state.box6Count;
 
   function validate() {
     let ok = true;
@@ -2791,8 +2832,9 @@ function renderSettings() {
     const btn = el('#settings-save-btn');
     if (btn) { btn.textContent = 'Saving…'; btn.disabled = true; }
     try {
-      await api.saveSettings(draft);
-      state.boxDays = [...draft];
+      await api.saveSettings(draft, draftBox6Count);
+      state.boxDays   = [...draft];
+      state.box6Count = draftBox6Count;
       showToast('Settings saved', 'success');
       render();
     } catch (err) {
@@ -2801,7 +2843,9 @@ function renderSettings() {
     }
   }
 
-  const rows = getBoxes().map((b, i) => {
+  // Rows for boxes 1–5 (interval days)
+  const rows = state.boxDays.map((_, i) => {
+    const b = getBoxes()[i];
     const inp = h('input', {
       class: 'field-input settings-day-input',
       id: `box-days-${i}`,
@@ -2822,15 +2866,25 @@ function renderSettings() {
     });
 
     return h('div', { class: 'settings-box-row' },
-      h('div', { class: 'settings-box-badge', style: { '--box-clr': b.color } },
-        `Box ${b.box}`,
-      ),
+      h('div', { class: 'settings-box-badge', style: { '--box-clr': b.color } }, `Box ${b.box}`),
       h('div', { class: 'settings-box-input-wrap' },
         inp,
         h('span', { class: 'settings-day-unit' }, 'days'),
       ),
       errEl,
     );
+  });
+
+  // Box 6 count input
+  const box6Inp = h('input', {
+    class: 'field-input settings-day-input',
+    id: 'box6-count-input',
+    type: 'number',
+    min: '1',
+    value: String(draftBox6Count),
+  });
+  box6Inp.addEventListener('input', e => {
+    draftBox6Count = parseInt(e.target.value, 10) || 1;
   });
 
   return h('div', { class: 'settings-page' },
@@ -2842,7 +2896,7 @@ function renderSettings() {
     ),
 
     h('div', { class: 'settings-card' },
-      h('h2', { class: 'settings-section-title' }, 'Review Intervals'),
+      h('h2', { class: 'settings-section-title' }, 'Review Intervals (Boxes 1–5)'),
       h('p',  { class: 'settings-section-sub' },
         'Set how many days after a correct answer each box waits before the card is due again. ',
         'Each box must be longer than the one before it.',
@@ -2850,6 +2904,21 @@ function renderSettings() {
       h('div', { class: 'settings-rows' }, ...rows),
       h('div', { class: 'settings-preview', id: 'settings-interval-preview' },
         draft.map((d, i) => `Box ${i+1}: ${d}d`).join('  ·  '),
+      ),
+    ),
+
+    h('div', { class: 'settings-card' },
+      h('h2', { class: 'settings-section-title' }, 'Box 6 — Daily Review'),
+      h('p',  { class: 'settings-section-sub' },
+        'Cards that master Box 5 graduate to Box 6. Each day a random selection is picked ',
+        'for review — cards with lower accuracy appear more often.',
+      ),
+      h('div', { class: 'settings-box-row' },
+        h('div', { class: 'settings-box-badge', style: { '--box-clr': BOX_COLORS[5] } }, 'Box 6'),
+        h('div', { class: 'settings-box-input-wrap' },
+          box6Inp,
+          h('span', { class: 'settings-day-unit' }, 'cards / day'),
+        ),
       ),
       h('div', { class: 'form-actions' },
         h('button', { class: 'btn-ghost', onClick: () => navigate('dashboard') }, 'Cancel'),

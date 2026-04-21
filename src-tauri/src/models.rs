@@ -42,6 +42,12 @@ pub struct EvalResult {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub box_days: Vec<i64>,
+    pub box6_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Stats {
     pub total_cards: i32,
     pub box_counts: Vec<i32>,

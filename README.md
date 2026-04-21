@@ -12,6 +12,8 @@ Enhanced Memory Optimization (EMO) is based on the spaced repetition principle, 
 - [X] Study mode (Leitner System)
     - [X] Customize reviewing days
 - [X] Export/Import words
+- [X] Add new box as "graduation box"
+    - The graduation box will select N words randomly, where the lower the accuracy, the higher the chance.
 
 ## Meaning Mode Setup
 
