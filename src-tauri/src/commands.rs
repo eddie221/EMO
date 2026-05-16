@@ -409,13 +409,13 @@ const MEANING_EVAL_PY: &str = include_str!("../python/meaning_eval.py");
 
 // Packages passed directly to pip — keeps requirements.txt out of the runtime data dir.
 const PIP_PACKAGES: &[&str] = &[
-    "transformers>=4.50.0",
-    "torch>=2.1.0,<3.0.0",
-    "accelerate>=0.26.0",
-    "sentencepiece",
-    "protobuf",
-    "torchvision",
+    "llama-cpp-python>=0.3.0",
+    "huggingface-hub>=0.23.0",
+    "numpy>=1.24.0",
 ];
+
+const MODEL_REPO: &str  = "Qwen/Qwen2.5-1.5B-Instruct-GGUF";
+const MODEL_FILE: &str  = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
 
 fn emo_data_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
@@ -503,31 +503,20 @@ fn find_python3() -> Result<std::path::PathBuf, String> {
     }
 }
 
-/// Returns true if the model snapshot directory exists and is non-empty.
-fn is_model_cached(model_id: &str) -> bool {
-    // HF stores models at $HF_HOME/hub/models--<org>--<name>/snapshots/<hash>/
-    let hf_home = std::env::var("HF_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_next::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".cache")
-                .join("huggingface")
-        });
-    let model_dir = hf_home
-        .join("hub")
-        .join(format!("models--{}", model_id.replace('/', "--")));
-    let snapshots = model_dir.join("snapshots");
-    let cached = snapshots.is_dir()
-        && fs::read_dir(&snapshots)
-            .ok()
-            .and_then(|mut d| d.next())
-            .is_some();
-    info!("is_model_cached({model_id}): {cached} (checked {})", snapshots.display());
+/// Returns true if the GGUF model file exists in EMO's model cache.
+fn is_model_cached() -> bool {
+    let path = dirs_next::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".cache")
+        .join("emo")
+        .join("models")
+        .join(MODEL_FILE);
+    let cached = path.is_file();
+    info!("is_model_cached: {cached} (checked {})", path.display());
     cached
 }
 
-/// Returns true if the EMO venv exists and the transformers package is present.
+/// Returns true if the EMO venv exists and the llama_cpp package is present.
 /// Uses filesystem checks only — no subprocess spawning — so it returns instantly.
 #[tauri::command]
 pub fn check_python_env() -> bool {
@@ -537,11 +526,10 @@ pub fn check_python_env() -> bool {
         return false;
     }
 
-    // Locate site-packages and check for the transformers directory
+    // Locate site-packages and check for the llama_cpp directory
     let site_packages = if cfg!(target_os = "windows") {
         venv.join("Lib").join("site-packages")
     } else {
-        // lib/pythonX.Y/site-packages — glob the pythonX.Y dir
         let lib = venv.join("lib");
         match fs::read_dir(&lib).ok().and_then(|mut d| d.find_map(|e| e.ok())) {
             Some(entry) => entry.path().join("site-packages"),
@@ -552,8 +540,8 @@ pub fn check_python_env() -> bool {
         }
     };
 
-    let ready = site_packages.join("transformers").is_dir();
-    info!("check_python_env: transformers present = {ready}");
+    let ready = site_packages.join("llama_cpp").is_dir();
+    info!("check_python_env: llama_cpp present = {ready}");
     ready
 }
 
@@ -562,7 +550,7 @@ pub fn check_python_env() -> bool {
 #[tauri::command]
 pub fn check_model_cached() -> bool {
     let venv_ok = check_python_env();
-    let model_ok = is_model_cached("google/gemma-3-1b-it");
+    let model_ok = is_model_cached();
     info!("check_model_cached: venv={venv_ok} model={model_ok}");
     venv_ok && model_ok
 }
@@ -594,7 +582,7 @@ fn stream_child(proc: &mut std::process::Child, app: &tauri::AppHandle) {
     }
 }
 
-fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload: bool) -> Result<(), String> {
+fn run_setup(app: &tauri::AppHandle, force_redownload: bool) -> Result<(), String> {
     let emit = |msg: &str| { app.emit("setup-log", msg.to_string()).ok(); };
 
     let data = emo_data_dir();
@@ -633,7 +621,7 @@ fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload:
     };
 
     // 2. Install packages inline — no requirements.txt file needed at runtime
-    emit("[2/3] Installing Python packages…");
+    emit("[2/3] Installing Python packages (llama-cpp-python, huggingface-hub, numpy)…");
     info!("run_setup: running pip install");
     let mut pip_args = vec!["install", "--progress-bar", "on"];
     pip_args.extend(PIP_PACKAGES.iter().copied());
@@ -653,8 +641,8 @@ fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload:
     }
     info!("run_setup: pip install succeeded");
 
-    // 3. Pre-download the model weights (skip if already cached, unless forced)
-    if !force_redownload && is_model_cached("google/gemma-3-1b-it") {
+    // 3. Download GGUF model (skip if already cached, unless forced)
+    if !force_redownload && is_model_cached() {
         info!("run_setup: model already cached, skipping download");
         emit("[3/3] Model already downloaded, skipping.");
         emit("Setup complete!");
@@ -662,29 +650,37 @@ fn run_setup(app: &tauri::AppHandle, hf_token: Option<String>, force_redownload:
     }
     if force_redownload {
         info!("run_setup: force_redownload=true, re-downloading model");
-        emit("[3/3] Re-downloading google/gemma-3-1b-it…");
+        emit(&format!("[3/3] Re-downloading {MODEL_FILE}…"));
     } else {
-        emit("[3/3] Downloading google/gemma-3-1b-it…");
+        emit(&format!("[3/3] Downloading {MODEL_FILE} (~1 GB)…"));
     }
     info!("run_setup: starting model download");
-    let dl_script = "\
-from transformers import AutoModelForCausalLM, AutoTokenizer
-print('Downloading tokenizer…', flush=True)
-AutoTokenizer.from_pretrained('google/gemma-3-1b-it')
-print('Downloading model weights…', flush=True)
-AutoModelForCausalLM.from_pretrained('google/gemma-3-1b-it')
-print('Download complete.', flush=True)
-";
 
-    let mut cmd = Command::new(&python);
-    cmd.args(["-u", "-c", dl_script])
+    // huggingface_hub.hf_hub_download caches to ~/.cache/huggingface/hub by
+    // default; we redirect to ~/.cache/emo/models via local_dir.
+    let dl_script = format!(
+        "\
+import os, pathlib
+from huggingface_hub import hf_hub_download
+dest = pathlib.Path.home() / '.cache' / 'emo' / 'models'
+dest.mkdir(parents=True, exist_ok=True)
+print('Downloading {MODEL_FILE}…', flush=True)
+hf_hub_download(
+    repo_id='{MODEL_REPO}',
+    filename='{MODEL_FILE}',
+    local_dir=str(dest),
+)
+print('Download complete.', flush=True)
+"
+    );
+
+    let mut proc = Command::new(&python)
+        .args(["-u", "-c", &dl_script])
         .env("PYTHONUNBUFFERED", "1")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(ref token) = hf_token {
-        cmd.env("HF_TOKEN", token);
-    }
-    let mut proc = cmd.spawn().map_err(|e| e.to_string())?;
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
 
     stream_child(&mut proc, app);
 
@@ -703,10 +699,10 @@ print('Download complete.', flush=True)
 /// Listen for "setup-log" events for progress, "setup-done" on success,
 /// and "setup-error" on failure.
 #[tauri::command]
-pub fn setup_python_env(app: tauri::AppHandle, hf_token: Option<String>, force_redownload: bool) -> Result<(), String> {
+pub fn setup_python_env(app: tauri::AppHandle, force_redownload: bool) -> Result<(), String> {
     info!("setup_python_env: spawning setup thread");
     std::thread::spawn(move || {
-        match run_setup(&app, hf_token, force_redownload) {
+        match run_setup(&app, force_redownload) {
             Ok(()) => {
                 info!("setup_python_env: setup completed successfully");
                 app.emit("setup-done", ()).ok();

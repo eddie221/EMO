@@ -124,6 +124,7 @@ const state = {
   practiceAnimating: false,
   practiceTyped: '',
   practiceTypedResult: null,
+  dotPopoverId: null,
 };
 
 // ── API ─────────────────────────────────────────────────────────────────────
@@ -136,7 +137,7 @@ const api = {
   keepInBox1:       (cardId)                       => invoke('keep_in_box1',       { cardId }),
   checkPythonEnv:   ()                             => invoke('check_python_env'),
   checkModelCached: ()                             => invoke('check_model_cached'),
-  setupPythonEnv:   (hfToken, forceRedownload)       => invoke('setup_python_env', { hfToken: hfToken || null, forceRedownload: !!forceRedownload }),
+  setupPythonEnv:   (forceRedownload)                => invoke('setup_python_env', { forceRedownload: !!forceRedownload }),
   startMeaningEval: ()                             => invoke('start_meaning_eval'),
   evaluateMeaning:  (word, description, userAnswer)=> invoke('evaluate_meaning', { word, description, userAnswer }),
   stopMeaningEval:  ()                             => invoke('stop_meaning_eval'),
@@ -714,16 +715,60 @@ function cardStatus(id, results) {
   const fDone = r.forward !== null;
   const rDone = r.reverse !== null;
   if (!fDone && !rDone) return 'pending';
-  if (fDone && rDone) return (r.forward && r.reverse) ? 'correct' : 'wrong';
-  return (r.forward === false || r.reverse === false) ? 'wrong' : 'partial';
+  if (fDone && rDone) {
+    if (r.forward && r.reverse)   return 'all-correct';  // green
+    if (!r.forward && !r.reverse) return 'all-wrong';    // red
+    return 'one-wrong';                                  // orange — mixed
+  }
+  // One side answered
+  const answeredRight = fDone ? r.forward : r.reverse;
+  return answeredRight ? 'one-right' : 'one-wrong';     // blue or orange
 }
 
-function buildStatusStrip(queue, results, currentId) {
+function buildStatusStrip(queue, results, currentId, onJump) {
   const ids = getUniqueIds(queue);
   return h('div', { class: 'status-strip' },
-    ...ids.map(id => h('div', {
-      class: `status-dot${id === currentId ? ' current' : ''} ${cardStatus(id, results)}`,
-    })),
+    ...ids.map(id => {
+      const fwdIdx = queue.findIndex(item => item.id === id && !item.reversed);
+      const revIdx = queue.findIndex(item => item.id === id &&  item.reversed);
+      const r      = results[id];
+      const fSt    = !r || r.forward === null ? 'pending' : r.forward  ? 'correct' : 'wrong';
+      const rSt    = !r || r.reverse === null ? 'pending' : r.reverse  ? 'correct' : 'wrong';
+      const fLabel = fSt === 'pending' ? 'Not yet' : fSt === 'correct' ? 'Correct' : 'Wrong';
+      const rLabel = rSt === 'pending' ? 'Not yet' : rSt === 'correct' ? 'Correct' : 'Wrong';
+      const isOpen = state.dotPopoverId === id;
+
+      return h('div', { class: 'dot-wrapper' },
+        h('div', {
+          class: `status-dot${id === currentId ? ' current' : ''} ${cardStatus(id, results)}`,
+          onClick: e => {
+            e.stopPropagation();
+            state.dotPopoverId = isOpen ? null : id;
+            render();
+          },
+        }),
+        isOpen ? h('div', { class: 'dot-popover open' },
+          fwdIdx >= 0 ? h('div', {
+            class: 'dot-popover-row',
+            onClick: e => { e.stopPropagation(); state.dotPopoverId = null; onJump(fwdIdx); },
+          },
+            h('span', { class: 'popover-arrow' }, '→'),
+            h('span', { class: 'popover-label' }, 'Forward'),
+            h('span', { class: `popover-pip ${fSt}` }),
+            h('span', { class: 'popover-status-label' }, fLabel),
+          ) : null,
+          revIdx >= 0 ? h('div', {
+            class: 'dot-popover-row',
+            onClick: e => { e.stopPropagation(); state.dotPopoverId = null; onJump(revIdx); },
+          },
+            h('span', { class: 'popover-arrow' }, '←'),
+            h('span', { class: 'popover-label' }, 'Reverse'),
+            h('span', { class: `popover-pip ${rSt}` }),
+            h('span', { class: 'popover-status-label' }, rLabel),
+          ) : null,
+        ) : null,
+      );
+    }),
   );
 }
 
@@ -764,7 +809,8 @@ function renderStudyCard() {
     ),
 
     // status strip
-    buildStatusStrip(state.studyQueue, state.studyResults, item.id),
+    buildStatusStrip(state.studyQueue, state.studyResults, item.id,
+      idx => { state.studyIdx = idx; state.studyFlipped = false; render(); }),
 
     // card stage
     h('div', { class: 'card-stage' },
@@ -2297,7 +2343,8 @@ function renderPracticeCard() {
       ),
     ),
 
-    buildStatusStrip(state.practiceQueue, state.practiceResults, card.id),
+    buildStatusStrip(state.practiceQueue, state.practiceResults, card.id,
+      idx => { state.practiceIdx = idx; state.practiceFlipped = false; render(); }),
 
     h('div', { class: 'card-stage' },
       buildPracticeFlashcard(card, bInfo),
@@ -2742,9 +2789,6 @@ function renderMeaningSetup() {
   const log     = state.meaningSetupLog;
 
   async function runSetup() {
-    const tokenInput = document.getElementById('hf-token-input');
-    const hfToken = tokenInput ? tokenInput.value.trim() : '';
-
     state.meaningEnvSetup  = true;
     state.meaningSetupLog  = ['Starting setup…'];
     state.meaningSetupError = null;
@@ -2776,7 +2820,7 @@ function renderMeaningSetup() {
     ]);
 
     // Fire-and-forget — the command returns immediately; completion comes via events.
-    api.setupPythonEnv(hfToken, state.meaningForceRedownload).catch(e => {
+    api.setupPythonEnv(state.meaningForceRedownload).catch(e => {
       cleanup();
       state.meaningEnvSetup = false;
       state.meaningSetupError = String(e);
@@ -2789,25 +2833,12 @@ function renderMeaningSetup() {
     h('div', { class: 'meaning-setup-icon' }, icon('cpu')),
     h('h2', {}, 'Python Environment Required'),
     h('p', { class: 'meaning-setup-desc' },
-      'Meaning mode uses a local AI model (google/gemma-3-1b-it) to evaluate your answers. ',
-      'A Python virtual environment named "EMO" will be created next to the database, ',
-      'and the model (~1 GB) will be downloaded.',
+      'Meaning mode uses a local AI model (Qwen2.5-1.5B-Instruct, ~1 GB) to evaluate your answers. ',
+      'A Python virtual environment will be created and the GGUF model file will be downloaded — ',
+      'no account or token required.',
     ),
     !running
       ? h('div', { class: 'meaning-token-section' },
-          h('p', { class: 'meaning-token-label' },
-            'Gemma requires a ',
-            h('a', { href: 'https://huggingface.co/google/gemma-3-1b-it', target: '_blank' }, 'HuggingFace account'),
-            ' and an accepted license. Paste your ',
-            h('a', { href: 'https://huggingface.co/settings/tokens', target: '_blank' }, 'access token'),
-            ' below:',
-          ),
-          h('input', {
-            id: 'hf-token-input',
-            type: 'password',
-            class: 'hf-token-input',
-            placeholder: 'hf_…',
-          }),
           h('button', { class: 'btn-primary', onClick: runSetup }, icon('download'), ' Set Up Now'),
         )
       : null,
@@ -3128,6 +3159,12 @@ async function boot() {
 
   app.appendChild(shell);
   document.addEventListener('keydown', handleKeyNav);
+  document.addEventListener('click', e => {
+    if (state.dotPopoverId && !e.target.closest('.dot-wrapper')) {
+      state.dotPopoverId = null;
+      render();
+    }
+  });
 
   render();
 }
