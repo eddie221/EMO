@@ -1,6 +1,6 @@
 """
 EMO Meaning Evaluator — llama.cpp inference via llama-cpp-python.
-Uses Qwen/Qwen2.5-1.5B-Instruct-GGUF (no HF token required).
+Uses Qwen/Qwen3-8B-GGUF (no HF token required).
 
 Protocol: JSON lines in, JSON lines out.
   Input:  {"word": str, "description": str, "user_answer": str}
@@ -9,11 +9,12 @@ Protocol: JSON lines in, JSON lines out.
   Error:  {"error": str}
 """
 
+import re
 import sys
 import json
 from pathlib import Path
 
-MODEL_FILE = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+MODEL_FILE = "Qwen3-8B-Q4_K_M.gguf"
 MODEL_PATH = Path.home() / ".cache" / "emo" / "models" / MODEL_FILE
 
 
@@ -21,39 +22,35 @@ def load_model():
     from llama_cpp import Llama
     return Llama(
         model_path=str(MODEL_PATH),
-        n_ctx=2048,
+        n_ctx=4096,
         n_gpu_layers=-1,  # use Metal/CUDA if available, else CPU
         verbose=False,
-    )
-
-
-def chat_prompt(user_msg: str) -> str:
-    return (
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        f"<|im_start|>user\n{user_msg}<|im_end|>\n"
-        "<|im_start|>assistant\n"
     )
 
 
 def evaluate(llm, word: str, description: str, user_answer: str) -> dict:
     ref = f'Correct definition: "{description}"' if description else \
           "(No reference definition — use your general knowledge.)"
-    prompt = (
+    # /no_think disables Qwen3's chain-of-thought mode for faster, direct output
+    user_msg = (
         "You are a strict but fair language-learning evaluator.\n\n"
         f'Word: "{word}"\n'
         f"{ref}\n"
         f'Answer: "{user_answer}"\n\n'
         "Does the answer correctly capture the meaning of the word? "
         "Reply with CORRECT or INCORRECT on the first line, "
-        "then one short feedback sentence."
+        "then one short feedback sentence. /no_think"
     )
-    output = llm(
-        chat_prompt(prompt),
-        max_tokens=120,
+    output = llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user",   "content": user_msg},
+        ],
+        max_tokens=150,
         temperature=0.0,
-        echo=False,
     )
-    text  = output["choices"][0]["text"].strip()
+    raw   = output["choices"][0]["message"]["content"]
+    text  = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
     first = text.split("\n")[0].strip().upper()
     correct = first.startswith("CORRECT") and not first.startswith("INCORRECT")
     return {"correct": correct, "feedback": text}

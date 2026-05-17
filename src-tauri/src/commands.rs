@@ -414,8 +414,8 @@ const PIP_PACKAGES: &[&str] = &[
     "numpy>=1.24.0",
 ];
 
-const MODEL_REPO: &str  = "Qwen/Qwen2.5-1.5B-Instruct-GGUF";
-const MODEL_FILE: &str  = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+const MODEL_REPO: &str  = "Qwen/Qwen3-8B-GGUF";
+const MODEL_FILE: &str  = "Qwen3-8B-Q4_K_M.gguf";
 
 fn emo_data_dir() -> std::path::PathBuf {
     dirs_next::data_dir()
