@@ -2833,7 +2833,7 @@ function renderMeaningSetup() {
     h('div', { class: 'meaning-setup-icon' }, icon('cpu')),
     h('h2', {}, 'Python Environment Required'),
     h('p', { class: 'meaning-setup-desc' },
-      'Meaning mode uses a local AI model (Qwen2.5-1.5B-Instruct, ~1 GB) to evaluate your answers. ',
+      'Meaning mode uses a local AI model (Qwen3-8B, ~5 GB) to evaluate your answers. ',
       'A Python virtual environment will be created and the GGUF model file will be downloaded — ',
       'no account or token required.',
     ),
