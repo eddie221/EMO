@@ -125,6 +125,13 @@ const state = {
   practiceTyped: '',
   practiceTypedResult: null,
   dotPopoverId: null,
+  // calendar
+  calendarYear:      new Date().getFullYear(),
+  calendarMonth:     new Date().getMonth(),   // 0-11
+  calendarActivity:  [],                      // [{date, total, correct}]
+  calendarSelectedDay: null,                  // "YYYY-MM-DD"
+  calendarDayReviews:  [],                    // [{card_id, lang1, lang2, correct, ...}]
+  calendarSidebarPage: 0,
 };
 
 // ── API ─────────────────────────────────────────────────────────────────────
@@ -145,7 +152,9 @@ const api = {
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
   getSettings:  ()                         => invoke('get_settings'),
   saveSettings: (box_days, box6_count)     => invoke('save_settings', { boxDays: box_days, box6Count: box6_count }),
-  getBox6Daily: ()                         => invoke('get_box6_daily'),
+  getBox6Daily:          ()     => invoke('get_box6_daily'),
+  getCalendarActivity:   ()     => invoke('get_calendar_activity'),
+  getDayReviews:         (date) => invoke('get_day_reviews', { date }),
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -262,6 +271,7 @@ async function refreshCards() {
 // ── Render dispatcher ─────────────────────────────────────────────────────────
 function render() {
   // keep sidebar fresh (badges, stats) on every render
+  _removeCalTooltip();
   const oldSidebar = el('.sidebar');
   if (oldSidebar) oldSidebar.replaceWith(buildSidebar());
 
@@ -279,6 +289,12 @@ function render() {
     case 'practice-select': main.appendChild(renderPracticeSelect()); break;
     case 'practice':        main.appendChild(renderPractice());       break;
   }
+
+  // calendar detail panel (right side, only when a day is selected)
+  const shell = document.querySelector('.shell');
+  document.querySelector('.cal-detail-panel')?.remove();
+  const detailPanel = buildCalDetailPanel();
+  if (detailPanel && shell) shell.appendChild(detailPanel);
 
   // global modals
   document.querySelectorAll('.modal-overlay').forEach(m => m.remove());
@@ -2994,6 +3010,151 @@ function renderSettings() {
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────────
+// ── Calendar (mini sidebar + detail panel) ────────────────────────────────────
+let _calTooltipEl = null;
+function _showCalTooltip(e, act) {
+  _removeCalTooltip();
+  const rect    = e.currentTarget.getBoundingClientRect();
+  const wrong   = act.total - act.correct;
+  const el      = document.createElement('div');
+  el.className  = 'mini-cal-tooltip';
+  el.innerHTML  =
+    `<span class="ctt-correct">✓ ${act.correct}</span>` +
+    `<span class="ctt-sep">/</span>` +
+    `<span class="ctt-wrong">✗ ${wrong}</span>`;
+  el.style.cssText = `position:fixed;left:${rect.left + rect.width/2}px;top:${rect.top - 6}px;transform:translate(-50%,-100%);pointer-events:none;z-index:600`;
+  document.body.appendChild(el);
+  _calTooltipEl = el;
+}
+function _removeCalTooltip() {
+  _calTooltipEl?.remove();
+  _calTooltipEl = null;
+}
+
+function buildMiniCal() {
+  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const DAY_LABELS  = ['M','T','W','T','F','S','S'];
+  const { calendarYear: year, calendarMonth: month } = state;
+
+  const actMap = {};
+  for (const a of state.calendarActivity) actMap[a.date] = a;
+
+  const firstDay    = new Date(year, month, 1);
+  const daysInMon   = new Date(year, month + 1, 0).getDate();
+  const startOffset = (firstDay.getDay() + 6) % 7;
+
+  const today    = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+  const sel      = state.calendarSelectedDay;
+
+  async function selectDay(dateStr) {
+    if (sel === dateStr) { state.calendarSelectedDay = null; state.calendarDayReviews = []; }
+    else { state.calendarSelectedDay = dateStr; state.calendarDayReviews = await api.getDayReviews(dateStr); state.calendarSidebarPage = 0; }
+    render();
+  }
+  function prevMonth() {
+    state.calendarMonth = month === 0 ? (state.calendarYear--, 11) : month - 1;
+    state.calendarSelectedDay = null; state.calendarDayReviews = []; render();
+  }
+  function nextMonth() {
+    state.calendarMonth = month === 11 ? (state.calendarYear++, 0) : month + 1;
+    state.calendarSelectedDay = null; state.calendarDayReviews = []; render();
+  }
+
+  const cells = [];
+  for (let i = 0; i < startOffset; i++) cells.push(null);
+  for (let d = 1; d <= daysInMon; d++) {
+    const key = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    cells.push({ d, key });
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  return h('div', { class: 'mini-cal' },
+    h('div', { class: 'mini-cal-header' },
+      h('button', { class: 'mini-cal-nav', onClick: prevMonth }, '‹'),
+      h('span', { class: 'mini-cal-label' }, `${MONTH_NAMES[month]} ${year}`),
+      h('button', { class: 'mini-cal-nav', onClick: nextMonth }, '›'),
+    ),
+    h('div', { class: 'mini-cal-grid' },
+      ...DAY_LABELS.map(l => h('div', { class: 'mini-cal-day-label' }, l)),
+      ...cells.map(cell => {
+        if (!cell) return h('div', { class: 'mini-cal-cell empty' });
+        const act = actMap[cell.key];
+        const dc  = act
+          ? (act.correct === act.total ? 'correct' : act.correct === 0 ? 'wrong' : 'partial')
+          : null;
+        return h('div', {
+          class: `mini-cal-cell${cell.key === todayKey ? ' today' : ''}${cell.key === sel ? ' selected' : ''}${act ? ' has-reviews' : ''}`,
+          onClick:       act ? () => selectDay(cell.key) : null,
+          onMouseenter:  act ? e => _showCalTooltip(e, act) : null,
+          onMouseleave:  act ? _removeCalTooltip : null,
+        },
+          h('span', { class: 'mini-cal-num' }, String(cell.d)),
+          dc ? h('span', { class: `cal-dot ${dc}` }) : null,
+        );
+      }),
+    ),
+  );
+}
+
+function buildCalDetailPanel() {
+  const sel     = state.calendarSelectedDay;
+  if (!sel) return null;
+
+  const MONTH_NAMES = ['January','February','March','April','May','June',
+                       'July','August','September','October','November','December'];
+  const reviews     = state.calendarDayReviews;
+  const ITEMS_PER_PAGE = 20;
+  const page        = state.calendarSidebarPage;
+  const totalPages  = Math.ceil(reviews.length / ITEMS_PER_PAGE) || 1;
+  const pageItems   = reviews.slice(page * ITEMS_PER_PAGE, (page + 1) * ITEMS_PER_PAGE);
+
+  const [y, m, d] = sel.split('-');
+  const dateLabel = `${MONTH_NAMES[+m-1]} ${+d}, ${y}`;
+
+  return h('aside', { class: 'cal-detail-panel' },
+    h('div', { class: 'cal-detail-header' },
+      h('div', {},
+        h('span', { class: 'cal-detail-date' }, dateLabel),
+        h('span', { class: 'cal-detail-count' },
+          `${reviews.length} review${reviews.length !== 1 ? 's' : ''}`),
+      ),
+      h('button', { class: 'cal-sidebar-close',
+        onClick: () => { state.calendarSelectedDay = null; state.calendarDayReviews = []; render(); },
+      }, '×'),
+    ),
+    h('div', { class: 'cal-detail-body' },
+      pageItems.length === 0
+        ? h('p', { class: 'cal-detail-empty' }, 'No reviews found.')
+        : pageItems.map(r => {
+            const boxMoved = r.box_after !== r.box_before;
+            const up       = r.box_after > r.box_before;
+            return h('div', { class: `cal-review-row ${r.correct ? 'correct' : 'wrong'}` },
+              h('div', { class: 'cal-review-words' },
+                h('span', { class: 'cal-review-lang1' }, r.lang1),
+                h('span', { class: 'cal-review-lang2' }, r.lang2),
+              ),
+              h('div', { class: 'cal-review-meta' },
+                h('span', { class: `result-badge ${r.correct ? 'correct' : 'wrong'}` },
+                  r.correct ? '✓' : '✗'),
+                h('span', { class: 'cal-box-move' },
+                  `Box ${r.box_before}`,
+                  boxMoved ? h('span', { class: up ? 'up' : 'down' }, ` → ${r.box_after}`) : null,
+                ),
+              ),
+            );
+          }),
+    ),
+    totalPages > 1 ? h('div', { class: 'cal-detail-footer' },
+      h('button', { class: 'cal-page-btn', disabled: page === 0,
+        onClick: () => { state.calendarSidebarPage = page - 1; render(); } }, '‹ Prev'),
+      h('span', { class: 'cal-page-info' }, `${page + 1} / ${totalPages}`),
+      h('button', { class: 'cal-page-btn', disabled: page >= totalPages - 1,
+        onClick: () => { state.calendarSidebarPage = page + 1; render(); } }, 'Next ›'),
+    ) : null,
+  );
+}
+
 function buildSidebar() {
   const navItems = [
     { view: 'dashboard',       label: 'Overview', icon: 'house'          },
@@ -3032,6 +3193,10 @@ function buildSidebar() {
       );
       return btn;
     }),
+    h('div', { class: 'sidebar-cal-section' },
+      buildMiniCal(),
+    ),
+
     h('button', {
       class: 'add-card-btn',
       onClick: () => { state.editCard = null; navigate('add'); },
@@ -3145,6 +3310,7 @@ function handleKeyNav(e) {
 async function boot() {
   try {
     await refresh();
+    state.calendarActivity = await api.getCalendarActivity();
   } catch (e) {
     console.error('Failed to load data:', e);
   }

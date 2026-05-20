@@ -15,6 +15,7 @@ Enhanced Memory Optimization (EMO) is based on the spaced repetition principle, 
 - [X] Add new box as "graduation box"
     - The graduation box will select N words randomly, where the lower the accuracy, the higher the chance.
 - [X] Updating the LLM usage to llama.cpp
+- [X] Calendar 
 
 ## Meaning Mode Setup
 

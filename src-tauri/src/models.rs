@@ -55,3 +55,21 @@ pub struct Stats {
     pub total_reviews: i32,
     pub correct_reviews: i32,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DayActivity {
+    pub date: String,
+    pub total: i32,
+    pub correct: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DayReview {
+    pub card_id: String,
+    pub lang1: String,
+    pub lang2: String,
+    pub correct: bool,
+    pub box_before: i32,
+    pub box_after: i32,
+    pub reviewed_at: String,
+}

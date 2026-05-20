@@ -10,7 +10,7 @@ use std::sync::{mpsc, Mutex};
 
 use crate::db::DbState;
 use crate::helpers::{next_review_date, parse_box_days, row_to_card, SELECT_ALL};
-use crate::models::{AppSettings, CreateFlashcard, EvalResult, Flashcard, ReviewResult, Stats};
+use crate::models::{AppSettings, CreateFlashcard, DayActivity, DayReview, EvalResult, Flashcard, ReviewResult, Stats};
 use rand::Rng;
 
 // ── Meaning eval process state ────────────────────────────────────────────────
@@ -363,6 +363,51 @@ pub fn get_box6_daily(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
     keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     let result = keyed.into_iter().take(n).map(|(_, i)| all[i].clone()).collect();
     Ok(result)
+}
+
+#[tauri::command]
+pub fn get_calendar_activity(state: State<DbState>) -> Result<Vec<DayActivity>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT date(reviewed_at) AS day, COUNT(*) AS total, SUM(correct) AS correct_count
+         FROM review_log GROUP BY day ORDER BY day",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(DayActivity {
+            date:    row.get(0)?,
+            total:   row.get(1)?,
+            correct: row.get(2)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(rows)
+}
+
+#[tauri::command]
+pub fn get_day_reviews(state: State<DbState>, date: String) -> Result<Vec<DayReview>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT r.card_id, f.lang1, f.lang2, r.correct, r.box_before, r.box_after, r.reviewed_at
+         FROM review_log r
+         JOIN flashcards f ON r.card_id = f.id
+         WHERE date(r.reviewed_at) = ?1
+         ORDER BY r.reviewed_at",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![date], |row| {
+        Ok(DayReview {
+            card_id:     row.get(0)?,
+            lang1:       row.get(1)?,
+            lang2:       row.get(2)?,
+            correct:     row.get::<_, i32>(3)? != 0,
+            box_before:  row.get(4)?,
+            box_after:   row.get(5)?,
+            reviewed_at: row.get(6)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(rows)
 }
 
 #[tauri::command]
