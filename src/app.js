@@ -1146,7 +1146,18 @@ function renderLibrary() {
         h('span', { class: 'search-icon' }, '⌕'),
         (() => {
           const inp = h('input', { class: 'search-input', type: 'text', placeholder: 'Search cards…', value: state.libSearch });
+          let composing = false;
+          inp.addEventListener('compositionstart', () => { composing = true; });
+          inp.addEventListener('compositionend', e => {
+            composing = false;
+            state.libSearch = e.target.value;
+            resetPage();
+            render();
+            const ni = el('.search-input');
+            if (ni) { ni.focus(); const p = ni.value.length; ni.setSelectionRange(p, p); }
+          });
           inp.addEventListener('input', e => {
+            if (composing) return;
             const pos = e.target.selectionStart;
             state.libSearch = e.target.value;
             resetPage();
@@ -2127,7 +2138,17 @@ function renderPracticeSelect() {
         h('span', { class: 'search-icon' }, '⌕'),
         (() => {
           const inp = h('input', { class: 'search-input', type: 'text', placeholder: 'Search cards…', value: state.practiceSearch });
+          let composing = false;
+          inp.addEventListener('compositionstart', () => { composing = true; });
+          inp.addEventListener('compositionend', e => {
+            composing = false;
+            state.practiceSearch = e.target.value;
+            render();
+            const ni = el('.search-input');
+            if (ni) { ni.focus(); const p = ni.value.length; ni.setSelectionRange(p, p); }
+          });
           inp.addEventListener('input', e => {
+            if (composing) return;
             const pos = e.target.selectionStart;
             state.practiceSearch = e.target.value;
             render();
