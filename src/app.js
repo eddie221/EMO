@@ -1143,14 +1143,51 @@ function applySort(cards, sortKey) {
   });
 }
 
-function sortControl(sortKey, onChange) {
-  const sel = h('select', { class: 'sort-select' });
-  SORT_OPTS.forEach(({ key, label }) => {
-    const opt = h('option', { value: key }, label);
-    if (key === sortKey) opt.selected = true;
-    sel.appendChild(opt);
+// Styled replacement for <select>. Keeps its own open state in the DOM so it
+// never triggers a full re-render. `options` is [{ value, label }].
+function dropdown({ options, value, onChange, className = '' }) {
+  let current = value;
+  const label = v => options.find(o => o.value === v)?.label ?? v;
+  const text = h('span', {}, label(current));
+  const trigger = h('button', { type: 'button', class: 'dd-trigger' }, text, icon('chevron-expand'));
+  const root = h('div', { class: `dd ${className}` }, trigger);
+  let menu = null;
+
+  const close = () => {
+    menu?.remove(); menu = null;
+    trigger.classList.remove('open');
+    document.removeEventListener('click', onOutside, true);
+  };
+  const onOutside = e => { if (!root.contains(e.target)) close(); };
+
+  trigger.addEventListener('click', () => {
+    if (menu) { close(); return; }
+    menu = h('div', { class: 'dd-menu' },
+      ...options.map(o => h('button', {
+        type: 'button',
+        class: `dd-option${o.value === current ? ' active' : ''}`,
+        onClick: () => {
+          current = o.value;
+          text.textContent = o.label;
+          close();
+          onChange(o.value);
+        },
+      }, h('span', { class: 'dd-check' }, o.value === current ? icon('check2') : null), o.label)),
+    );
+    root.appendChild(menu);
+    trigger.classList.add('open');
+    document.addEventListener('click', onOutside, true);
   });
-  sel.addEventListener('change', () => onChange(sel.value));
+  return root;
+}
+
+function sortControl(sortKey, onChange) {
+  const sel = dropdown({
+    className: 'sort-select',
+    options: SORT_OPTS.map(({ key, label }) => ({ value: key, label })),
+    value: sortKey,
+    onChange,
+  });
   return h('div', { class: 'sort-control' },
     h('span', { class: 'filter-label' }, 'Sort'),
     sel,
@@ -1803,15 +1840,12 @@ function renderForm() {
   }
 
   function selectField(key, options, label) {
-    const sel = h('select', { class: 'field-input' },
-      ...options.map(o => {
-        const opt = h('option', { value: o }, o);
-        if (o === form[key]) opt.setAttribute('selected', 'selected');
-        return opt;
-      }),
-    );
-    sel.value = form[key];
-    sel.addEventListener('change', e => { form[key] = e.target.value; });
+    const sel = dropdown({
+      className: 'field-input',
+      options: options.map(o => ({ value: o, label: o })),
+      value: form[key],
+      onChange: v => { form[key] = v; },
+    });
     return h('div', { class: 'field' },
       h('label', { class: 'field-label' }, label),
       sel,
