@@ -1,4 +1,4 @@
-use chrono::{Duration, Local, NaiveTime, TimeZone};
+use chrono::Local;
 use log::{debug, error, info, warn};
 use rusqlite::params;
 use tauri::{Emitter, Manager, State};
@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 use std::sync::{mpsc, Mutex};
 
 use crate::db::DbState;
-use crate::helpers::{next_review_date, parse_box_days, row_to_card, SELECT_ALL};
+use crate::helpers::{current_study_day, next_review_day, parse_box_days, row_to_card, SELECT_ALL};
 use crate::models::{AppSettings, CreateFlashcard, DayActivity, DayReview, EvalResult, Flashcard, ReviewResult, Stats};
 use rand::Rng;
 
@@ -55,7 +55,74 @@ fn load_box_days(conn: &rusqlite::Connection) -> Vec<i64> {
     parse_box_days(&raw)
 }
 
+fn get_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM settings WHERE key=?1", params![key], |r| r.get(0)).ok()
+}
+
+fn set_setting(conn: &rusqlite::Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Languages are stored newline-separated in settings; any language that cards
+/// already use (e.g. from before this setting existed) is merged in.
+fn load_languages(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut langs: Vec<String> = get_setting(conn, "languages")
+        .unwrap_or_default()
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT language FROM flashcards ORDER BY language") {
+        if let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0)) {
+            for l in rows.flatten() {
+                if !langs.contains(&l) { langs.push(l); }
+            }
+        }
+    }
+    if langs.is_empty() { langs.push("English".to_string()); }
+    langs
+}
+
+fn load_current_language(conn: &rusqlite::Connection, langs: &[String]) -> String {
+    get_setting(conn, "current_language")
+        .filter(|l| langs.contains(l))
+        .unwrap_or_else(|| langs[0].clone())
+}
+
 // ── Commands ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn get_study_day(state: State<DbState>) -> Result<i64, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(current_study_day(&conn))
+}
+
+#[tauri::command]
+pub fn add_language(state: State<DbState>, name: String) -> Result<Vec<String>, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Language name is required".into());
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut langs = load_languages(&conn);
+    if langs.iter().any(|l| l.eq_ignore_ascii_case(&name)) {
+        return Err(format!("Language \"{}\" already exists", name));
+    }
+    langs.push(name);
+    set_setting(&conn, "languages", &langs.join("\n"))?;
+    Ok(langs)
+}
+
+#[tauri::command]
+pub fn set_current_language(state: State<DbState>, name: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    set_setting(&conn, "current_language", &name)
+}
 
 #[tauri::command]
 pub fn get_settings(state: State<DbState>) -> Result<AppSettings, String> {
@@ -70,7 +137,10 @@ pub fn get_settings(state: State<DbState>) -> Result<AppSettings, String> {
         .unwrap_or_else(|_| "5".to_string())
         .parse()
         .unwrap_or(5);
-    Ok(AppSettings { box_days, box6_count })
+    let study_day = current_study_day(&conn);
+    let languages = load_languages(&conn);
+    let current_language = load_current_language(&conn, &languages);
+    Ok(AppSettings { box_days, box6_count, study_day, current_language, languages })
 }
 
 #[tauri::command]
@@ -109,26 +179,26 @@ pub fn save_settings(state: State<DbState>, box_days: Vec<i64>, box6_count: i64)
 }
 
 #[tauri::command]
-pub fn get_all_cards(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
+pub fn get_all_cards(state: State<DbState>, language: String) -> Result<Vec<Flashcard>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare(&format!("{} ORDER BY box_number, created_at", SELECT_ALL))
+        .prepare(&format!("{} WHERE language=?1 ORDER BY box_number, created_at", SELECT_ALL))
         .map_err(|e| e.to_string())?;
-    let cards = stmt.query_map([], |row| row_to_card(row)).map_err(|e| e.to_string())?;
+    let cards = stmt.query_map(params![language], |row| row_to_card(row)).map_err(|e| e.to_string())?;
     cards.map(|c| c.map_err(|e| e.to_string())).collect()
 }
 
 #[tauri::command]
-pub fn get_due_cards(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
+pub fn get_due_cards(state: State<DbState>, language: String) -> Result<Vec<Flashcard>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let today = current_study_day(&conn);
     let mut stmt = conn
         .prepare(&format!(
-            "{} WHERE next_review <= ?1 ORDER BY box_number ASC, next_review ASC",
+            "{} WHERE language=?1 AND next_review_day <= ?2 ORDER BY box_number ASC, next_review_day ASC",
             SELECT_ALL
         ))
         .map_err(|e| e.to_string())?;
-    let cards = stmt.query_map(params![now], |row| row_to_card(row)).map_err(|e| e.to_string())?;
+    let cards = stmt.query_map(params![language, today], |row| row_to_card(row)).map_err(|e| e.to_string())?;
     cards.map(|c| c.map_err(|e| e.to_string())).collect()
 }
 
@@ -139,17 +209,19 @@ pub fn add_card(state: State<DbState>, card: CreateFlashcard) -> Result<Flashcar
     let id = Uuid::new_v4().to_string();
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let box_num = card.box_number.unwrap_or(1).clamp(1, 6);
-    let next_review = next_review_date(box_num, &box_days);
+    let next_review_day = next_review_day(box_num, &box_days, current_study_day(&conn));
+    let language = card.language.clone().filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| load_current_language(&conn, &load_languages(&conn)));
     conn.execute(
         "INSERT INTO flashcards
          (id, lang1, lang2, description_lang1, part_of_speech,
-          example_sentences, usage_frequency, box_number, next_review, created_at, updated_at,
+          example_sentences, usage_frequency, box_number, next_review_day, language, created_at, updated_at,
           total_reviews, correct_reviews)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,0)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,0)",
         params![
             id, card.lang1, card.lang2, card.description_lang1,
             card.part_of_speech, card.example_sentences, card.usage_frequency,
-            box_num, next_review, now, now
+            box_num, next_review_day, language, now, now
         ],
     )
     .map_err(|e| e.to_string())?;
@@ -162,7 +234,8 @@ pub fn add_card(state: State<DbState>, card: CreateFlashcard) -> Result<Flashcar
         example_sentences: card.example_sentences,
         usage_frequency: card.usage_frequency,
         box_number: box_num,
-        next_review,
+        next_review_day,
+        language,
         created_at: now.clone(),
         updated_at: now,
         total_reviews: 0,
@@ -204,6 +277,7 @@ pub fn delete_card(state: State<DbState>, id: String) -> Result<(), String> {
 pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashcard, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let box_days = load_box_days(&conn);
+    let today = current_study_day(&conn);
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let (current_box, total_reviews, correct_reviews): (i32, i32, i32) = conn
         .query_row(
@@ -216,12 +290,12 @@ pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashc
     // Correct in box 5 → promotes to box 6. Correct in box 6 → stays in box 6.
     // Wrong from any box (including 6) → back to box 1.
     let new_box = if result.correct { (current_box + 1).min(6) } else { 1 };
-    let next_review = next_review_date(new_box, &box_days);
+    let next_review = next_review_day(new_box, &box_days, today);
     let new_total   = total_reviews + 1;
     let new_correct = if result.correct { correct_reviews + 1 } else { correct_reviews };
 
     conn.execute(
-        "UPDATE flashcards SET box_number=?1, next_review=?2, updated_at=?3,
+        "UPDATE flashcards SET box_number=?1, next_review_day=?2, updated_at=?3,
          total_reviews=?4, correct_reviews=?5 WHERE id=?6",
         params![new_box, next_review, now, new_total, new_correct, result.card_id],
     )
@@ -247,14 +321,9 @@ pub fn review_card(state: State<DbState>, result: ReviewResult) -> Result<Flashc
 pub fn keep_in_box1(state: State<DbState>, card_id: String) -> Result<Flashcard, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let tomorrow = (Local::now() + Duration::days(1)).date_naive();
-    let next_review = Local
-        .from_local_datetime(&tomorrow.and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()))
-        .unwrap()
-        .format("%Y-%m-%dT%H:%M:%S")
-        .to_string();
+    let next_review = current_study_day(&conn) + 1;
     conn.execute(
-        "UPDATE flashcards SET box_number=1, next_review=?1, updated_at=?2 WHERE id=?3",
+        "UPDATE flashcards SET box_number=1, next_review_day=?1, updated_at=?2 WHERE id=?3",
         params![next_review, now, card_id],
     )
     .map_err(|e| e.to_string())?;
@@ -267,18 +336,18 @@ pub fn keep_in_box1(state: State<DbState>, card_id: String) -> Result<Flashcard,
 }
 
 #[tauri::command]
-pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
+pub fn get_stats(state: State<DbState>, language: String) -> Result<Stats, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let today = current_study_day(&conn);
     let total_cards: i32 = conn
-        .query_row("SELECT COUNT(*) FROM flashcards", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM flashcards WHERE language=?1", params![language], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     let mut box_counts = Vec::new();
     for b in 1..=6 {
         let count: i32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM flashcards WHERE box_number=?1",
-                params![b],
+                "SELECT COUNT(*) FROM flashcards WHERE box_number=?1 AND language=?2",
+                params![b, language],
                 |r| r.get(0),
             )
             .map_err(|e| e.to_string())?;
@@ -286,15 +355,15 @@ pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
     }
     let cards_due_today: i32 = conn
         .query_row(
-            "SELECT COUNT(*) FROM flashcards WHERE next_review <= ?1",
-            params![now],
+            "SELECT COUNT(*) FROM flashcards WHERE next_review_day <= ?1 AND language=?2",
+            params![today, language],
             |r| r.get(0),
         )
         .map_err(|e| e.to_string())?;
     let (total_reviews, correct_reviews): (i32, i32) = conn
         .query_row(
-            "SELECT COALESCE(SUM(total_reviews),0), COALESCE(SUM(correct_reviews),0) FROM flashcards",
-            [],
+            "SELECT COALESCE(SUM(total_reviews),0), COALESCE(SUM(correct_reviews),0) FROM flashcards WHERE language=?1",
+            params![language],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
@@ -306,7 +375,7 @@ pub fn get_stats(state: State<DbState>) -> Result<Stats, String> {
 /// Uses the Efraimidis–Spirakis algorithm (weighted reservoir) for correct
 /// without-replacement sampling.
 #[tauri::command]
-pub fn get_box6_daily(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
+pub fn get_box6_daily(state: State<DbState>, language: String) -> Result<Vec<Flashcard>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
     let count: i64 = conn
@@ -321,10 +390,10 @@ pub fn get_box6_daily(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
         .max(1);
 
     let mut stmt = conn
-        .prepare(&format!("{} WHERE box_number=6", SELECT_ALL))
+        .prepare(&format!("{} WHERE box_number=6 AND language=?1", SELECT_ALL))
         .map_err(|e| e.to_string())?;
     let all: Vec<Flashcard> = stmt
-        .query_map([], |row| row_to_card(row))
+        .query_map(params![language], |row| row_to_card(row))
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
@@ -366,13 +435,14 @@ pub fn get_box6_daily(state: State<DbState>) -> Result<Vec<Flashcard>, String> {
 }
 
 #[tauri::command]
-pub fn get_calendar_activity(state: State<DbState>) -> Result<Vec<DayActivity>, String> {
+pub fn get_calendar_activity(state: State<DbState>, language: String) -> Result<Vec<DayActivity>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
-        "SELECT date(reviewed_at) AS day, COUNT(*) AS total, SUM(correct) AS correct_count
-         FROM review_log GROUP BY day ORDER BY day",
+        "SELECT date(r.reviewed_at) AS day, COUNT(*) AS total, SUM(r.correct) AS correct_count
+         FROM review_log r JOIN flashcards f ON r.card_id = f.id
+         WHERE f.language = ?1 GROUP BY day ORDER BY day",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
+    let rows = stmt.query_map(params![language], |row| {
         Ok(DayActivity {
             date:    row.get(0)?,
             total:   row.get(1)?,
@@ -385,16 +455,16 @@ pub fn get_calendar_activity(state: State<DbState>) -> Result<Vec<DayActivity>, 
 }
 
 #[tauri::command]
-pub fn get_day_reviews(state: State<DbState>, date: String) -> Result<Vec<DayReview>, String> {
+pub fn get_day_reviews(state: State<DbState>, date: String, language: String) -> Result<Vec<DayReview>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(
         "SELECT r.card_id, f.lang1, f.lang2, r.correct, r.box_before, r.box_after, r.reviewed_at
          FROM review_log r
          JOIN flashcards f ON r.card_id = f.id
-         WHERE date(r.reviewed_at) = ?1
+         WHERE date(r.reviewed_at) = ?1 AND f.language = ?2
          ORDER BY r.reviewed_at",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![date], |row| {
+    let rows = stmt.query_map(params![date, language], |row| {
         Ok(DayReview {
             card_id:     row.get(0)?,
             lang1:       row.get(1)?,
@@ -416,8 +486,8 @@ pub fn reset_card(state: State<DbState>, id: String) -> Result<(), String> {
     let box_days = load_box_days(&conn);
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     conn.execute(
-        "UPDATE flashcards SET box_number=1, next_review=?1, updated_at=?2 WHERE id=?3",
-        params![next_review_date(1, &box_days), now, id],
+        "UPDATE flashcards SET box_number=1, next_review_day=?1, updated_at=?2 WHERE id=?3",
+        params![next_review_day(1, &box_days, current_study_day(&conn)), now, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -429,9 +499,9 @@ pub fn move_card(state: State<DbState>, id: String, box_number: i32) -> Result<(
     let box_days = load_box_days(&conn);
     let box_num = box_number.clamp(1, 6);
     let now = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let next_review = next_review_date(box_num, &box_days);
+    let next_review = next_review_day(box_num, &box_days, current_study_day(&conn));
     conn.execute(
-        "UPDATE flashcards SET box_number=?1, next_review=?2, updated_at=?3 WHERE id=?4",
+        "UPDATE flashcards SET box_number=?1, next_review_day=?2, updated_at=?3 WHERE id=?4",
         params![box_num, next_review, now, id],
     )
     .map_err(|e| e.to_string())?;

@@ -55,6 +55,11 @@ const state = {
   dueCards: [],
   stats: null,
   editCard: null,
+  // languages / study days
+  language: 'English',
+  languages: ['English'],
+  addingLanguage: false,
+  studyDay: 1,
   // study
   studySort: 'due',
   studySelected: new Set(),
@@ -136,8 +141,11 @@ const state = {
 
 // ── API ─────────────────────────────────────────────────────────────────────
 const api = {
-  getAllCards:  ()            => invoke('get_all_cards'),
-  addCard:      (card)       => invoke('add_card',      { card }),
+  getAllCards:  ()            => invoke('get_all_cards', { language: state.language }),
+  addCard:      (card)       => invoke('add_card',      { card: { language: state.language, ...card } }),
+  getStudyDay:  ()            => invoke('get_study_day'),
+  addLanguage:  (name)        => invoke('add_language',  { name }),
+  setCurrentLanguage: (name)  => invoke('set_current_language', { name }),
   updateCard:   (id, card)   => invoke('update_card',   { id, card }),
   deleteCard:   (id)         => invoke('delete_card',   { id }),
   reviewCard:   (result)     => invoke('review_card',   { result }),
@@ -152,9 +160,9 @@ const api = {
   moveCard:     (id, box_number) => invoke('move_card', { id, boxNumber: box_number }),
   getSettings:  ()                         => invoke('get_settings'),
   saveSettings: (box_days, box6_count)     => invoke('save_settings', { boxDays: box_days, box6Count: box6_count }),
-  getBox6Daily:          ()     => invoke('get_box6_daily'),
-  getCalendarActivity:   ()     => invoke('get_calendar_activity'),
-  getDayReviews:         (date) => invoke('get_day_reviews', { date }),
+  getBox6Daily:          ()     => invoke('get_box6_daily', { language: state.language }),
+  getCalendarActivity:   ()     => invoke('get_calendar_activity', { language: state.language }),
+  getDayReviews:         (date) => invoke('get_day_reviews', { date, language: state.language }),
 };
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -229,14 +237,8 @@ function matchAccFilter(card, filter) {
 }
 
 // ── Refresh ──────────────────────────────────────────────────────────────────
-function localNowString() {
-  const d = new Date(), pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
 function computeDerived() {
-  const now = localNowString();
-  state.dueCards = state.cards.filter(c => c.next_review <= now);
+  state.dueCards = state.cards.filter(c => c.next_review_day <= state.studyDay);
   const boxCounts = [0, 0, 0, 0, 0, 0];
   let totalReviews = 0, correctReviews = 0;
   for (const c of state.cards) {
@@ -255,17 +257,72 @@ function computeDerived() {
 
 // Full refresh: used only at boot (needs settings too)
 async function refresh() {
-  const [cards, settings] = await Promise.all([api.getAllCards(), api.getSettings()]);
-  state.cards    = cards;
-  state.boxDays  = settings.box_days;
+  const settings = await api.getSettings();
+  state.boxDays   = settings.box_days;
   state.box6Count = settings.box6_count;
+  state.studyDay  = settings.study_day;
+  state.languages = settings.languages;
+  state.language  = settings.current_language;
+  state.cards     = await api.getAllCards();
   computeDerived();
 }
 
 // Card-only refresh: used after any card mutation (settings unchanged)
 async function refreshCards() {
-  state.cards = await api.getAllCards();
+  [state.cards, state.studyDay] = await Promise.all([api.getAllCards(), api.getStudyDay()]);
   computeDerived();
+}
+
+async function switchLanguage(name) {
+  if (name === state.language) return;
+  state.language = name;
+  await api.setCurrentLanguage(name);
+  Object.assign(state, {
+    studyStarted: false, studyDone: false, studySelected: new Set(), studyFilterBox: new Set(), box6DailyCards: [],
+    practiceSelected: new Set(), practiceSearch: '', practiceFilterBox: null, practiceFilterPos: new Set(),
+    libSelected: new Set(), libSelectMode: false, libSearch: '', libFilterBox: new Set(), libFilterPos: new Set(),
+    libFilterAcc: null, libFilterDue: false, libExpanded: null, libPage: 0, editCard: null,
+    calendarSelectedDay: null, calendarDayReviews: [],
+  });
+  await refreshCards();
+  state.calendarActivity = await api.getCalendarActivity();
+  navigate('dashboard');
+}
+
+function buildLanguageSwitcher() {
+  const commitNew = async input => {
+    const name = input.value.trim();
+    state.addingLanguage = false;
+    if (!name) { render(); return; }
+    try {
+      state.languages = await api.addLanguage(name);
+      await switchLanguage(name);
+    } catch (err) {
+      showToast(String(err), 'error');
+      render();
+    }
+  };
+
+  if (state.addingLanguage) {
+    const input = h('input', { class: 'field-input lang-input', type: 'text', placeholder: 'Language name' });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') commitNew(input);
+      if (e.key === 'Escape') { state.addingLanguage = false; render(); }
+    });
+    setTimeout(() => input.focus(), 0);
+    return h('div', { class: 'lang-switcher' }, input);
+  }
+
+  const sel = h('select', { class: 'field-input lang-select', title: 'Learning language' },
+    ...state.languages.map(l => h('option', { value: l }, l)),
+    h('option', { value: '__add__' }, '+ Add language…'),
+  );
+  sel.value = state.language;
+  sel.addEventListener('change', e => {
+    if (e.target.value === '__add__') { state.addingLanguage = true; render(); }
+    else switchLanguage(e.target.value);
+  });
+  return h('div', { class: 'lang-switcher' }, icon('translate'), sel);
 }
 
 // ── Render dispatcher ─────────────────────────────────────────────────────────
@@ -1057,7 +1114,7 @@ function applySort(cards, sortKey) {
       case 'za':       return b.lang1.localeCompare(a.lang1);
       case 'box_asc':  return a.box_number - b.box_number;
       case 'box_desc': return b.box_number - a.box_number;
-      case 'due':      return a.next_review.localeCompare(b.next_review);
+      case 'due':      return a.next_review_day - b.next_review_day;
       case 'acc_asc':  return acc(a) - acc(b);
       case 'acc_desc': return acc(b) - acc(a);
       default:         return a.lang1.localeCompare(b.lang1); // az
@@ -1646,7 +1703,10 @@ function renderCardDetail(card) {
     ),
   );
 
-  const nextDate = new Date(card.next_review).toLocaleDateString();
+  const untilDue = card.next_review_day - state.studyDay;
+  const nextDate = card.box_number === 6 ? 'daily lottery'
+    : untilDue <= 0 ? 'due now'
+    : `in ${untilDue} study day${untilDue === 1 ? '' : 's'}`;
 
   return h('div', { class: 'card-detail' },
     ...sections,
@@ -2971,7 +3031,7 @@ function renderSettings() {
       h('div', { class: 'settings-box-badge', style: { '--box-clr': b.color } }, `Box ${b.box}`),
       h('div', { class: 'settings-box-input-wrap' },
         inp,
-        h('span', { class: 'settings-day-unit' }, 'days'),
+        h('span', { class: 'settings-day-unit' }, 'study days'),
       ),
       errEl,
     );
@@ -3193,6 +3253,7 @@ function buildSidebar() {
         h('span', { class: 'brand-sub'  }, '5-Box System'),
       ),
     ),
+    buildLanguageSwitcher(),
     ...navItems.map(item => {
       const isPracticeItem = item.view === 'practice-select';
       const isActive = state.view === item.view

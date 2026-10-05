@@ -10,7 +10,8 @@ pub struct Flashcard {
     pub example_sentences: String,
     pub usage_frequency: String,
     pub box_number: i32,
-    pub next_review: String,
+    pub next_review_day: i64,
+    pub language: String,
     pub created_at: String,
     pub updated_at: String,
     pub total_reviews: i32,
@@ -27,6 +28,8 @@ pub struct CreateFlashcard {
     pub usage_frequency: String,
     #[serde(default)]
     pub box_number: Option<i32>,
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub struct EvalResult {
 pub struct AppSettings {
     pub box_days: Vec<i64>,
     pub box6_count: i64,
+    pub study_day: i64,
+    pub current_language: String,
+    pub languages: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
