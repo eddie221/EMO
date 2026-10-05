@@ -122,6 +122,7 @@ const state = {
   practicePage: 0,
   practiceResults: {},
   practiceMode: 'flip',
+  practiceSides: 'both',      // flip mode: 'both' | 'forward' | 'reverse'
   // meaning mode
   meaningEnvReady: null,      // null=unknown, false=not ready, true=ready
   meaningEnvSetup: false,     // true while setup is running
@@ -698,7 +699,7 @@ function renderStudySelect() {
             : 'All cards are scheduled for later. Check back soon!'),
           h('button', { class: 'btn-primary', onClick: () => navigate('dashboard') }, 'Back to Overview'),
         )
-      : h('div', {},
+      : h('div', { class: 'list-scroll' },
           h('div', { class: 'card-list' },
             ...paged.map(card => {
               const checked = state.studySelected.has(card.id);
@@ -909,9 +910,10 @@ function renderStudyCard() {
     // card stage
     h('div', { class: 'card-stage' },
       buildFlashcard(item, bInfo),
+      flipButton(() => !state.studyAnimating && ((state.studyFlipped = !state.studyFlipped), render())),
       buildAnswerSection(item),
       !state.studyFlipped
-        ? h('p', { class: 'flip-prompt' }, 'Click the card or press ', h('kbd', { class: 'key-hint' }, 'Space'), ' to see the answer')
+        ? h('p', { class: 'flip-prompt' }, 'Press ', h('kbd', { class: 'key-hint' }, 'Space'), ' or use Flip to see the answer')
         : h('span', {}),
     ),
 
@@ -1002,7 +1004,6 @@ function buildFlashcard(card, bInfo) {
           h('p',    { class: 'card-sec-body'  }, card.description_lang1),
         )
       : null,
-    h('div', { class: 'card-hint' }, 'tap to reveal →'),
   );
 
   const backChildren = [
@@ -1038,15 +1039,13 @@ function buildFlashcard(card, bInfo) {
   const inner = h('div', { class: 'card-inner' }, front, back);
   const fc    = h('div', {
     class: `flashcard${state.studyFlipped ? ' flipped' : ''}`,
-    onClick: () => {
-      if (!state.studyAnimating) {
-        state.studyFlipped = !state.studyFlipped;
-        render();
-      }
-    },
   }, inner);
 
   return fc;
+}
+
+function flipButton(onClick) {
+  return h('button', { class: 'btn-ghost btn-sm flip-btn', onClick }, icon('arrow-repeat'), ' Flip card');
 }
 
 function buildAnswerSection(_card) {
@@ -1423,7 +1422,7 @@ function renderLibrary() {
 
     filtered.length === 0
       ? renderLibraryEmpty()
-      : h('div', {},
+      : h('div', { class: 'list-scroll' },
           renderCardList(paged),
           totalPages > 1
             ? h('div', { class: 'pagination' },
@@ -1665,22 +1664,24 @@ function renderImportHelpModal() {
           h('code', {}, 'box_number'),
           ', which requires a named header.',
         ),
-        h('table', { class: 'help-table' },
-          h('thead', {},
-            h('tr', {},
-              h('th', {}, 'Column'),
-              h('th', {}, 'Required'),
-              h('th', {}, 'Description'),
-              h('th', {}, 'Accepted values'),
-            ),
-          ),
-          h('tbody', {},
-            ...COLS.map(col =>
+        h('div', { class: 'help-table-wrap' },
+          h('table', { class: 'help-table' },
+            h('thead', {},
               h('tr', {},
-                h('td', {}, h('code', {}, col.name)),
-                h('td', { class: col.req ? 'req-yes' : 'req-no' }, col.req ? '✓' : '—'),
-                h('td', {}, col.desc),
-                h('td', { class: 'help-values' }, col.values),
+                h('th', {}, 'Column'),
+                h('th', {}, 'Required'),
+                h('th', {}, 'Description'),
+                h('th', {}, 'Accepted values'),
+              ),
+            ),
+            h('tbody', {},
+              ...COLS.map(col =>
+                h('tr', {},
+                  h('td', {}, h('code', {}, col.name)),
+                  h('td', { class: col.req ? 'req-yes' : 'req-no' }, col.req ? '✓' : '—'),
+                  h('td', {}, col.desc),
+                  h('td', { class: 'help-values' }, col.values),
+                ),
               ),
             ),
           ),
@@ -2207,6 +2208,15 @@ function renderPracticeSelect() {
               onClick: () => { state.practiceMode = 'meaning'; render(); },
             }, icon('chat-text'), ' Meaning'),
           ),
+          state.practiceMode === 'flip'
+            ? h('div', { class: 'mode-toggle' },
+                ...[['both', 'Both sides'], ['forward', 'Word → Translation'], ['reverse', 'Translation → Word']]
+                  .map(([key, label]) => h('button', {
+                    class: `mode-toggle-btn${state.practiceSides === key ? ' active' : ''}`,
+                    onClick: () => { state.practiceSides = key; render(); },
+                  }, label)),
+              )
+            : null,
           h('button', {
             class: 'btn-primary btn-sm',
             disabled: selCount === 0,
@@ -2356,7 +2366,7 @@ function renderPracticeSelect() {
           h('p', { class: 'empty-title' }, state.cards.length === 0 ? 'No cards yet' : 'No matches'),
           h('p', { class: 'empty-sub' }, state.cards.length === 0 ? 'Add some cards first' : 'Try adjusting your filters'),
         )
-      : h('div', {},
+      : h('div', { class: 'list-scroll' },
           h('div', { class: 'practice-pick-list' },
           ...paged.map(card => {
             const checked = state.practiceSelected.has(card.id);
@@ -2400,12 +2410,11 @@ function renderPracticeSelect() {
 function startPractice() {
   const ids = state.practiceSelected;
   const picked = state.cards.filter(c => ids.has(c.id));
-  const entries = state.practiceMode === 'flip'
-    ? [
-        ...picked.map(c => ({ ...c, reversed: false })),
-        ...picked.map(c => ({ ...c, reversed: true  })),
-      ]
-    : picked.map(c => ({ ...c, reversed: false }));
+  const sides = state.practiceMode === 'flip' ? state.practiceSides : 'forward';
+  const entries = [
+    ...(sides !== 'reverse' ? picked.map(c => ({ ...c, reversed: false })) : []),
+    ...(sides !== 'forward' ? picked.map(c => ({ ...c, reversed: true  })) : []),
+  ];
   state.practiceQueue       = entries.sort(() => Math.random() - 0.5);
   state.practiceIdx         = 0;
   state.practiceFlipped     = false;
@@ -2432,11 +2441,13 @@ function renderPractice() {
 function renderPracticeDone() {
   const uniqueIds    = getUniqueIds(state.practiceQueue);
   const uniqueTotal  = uniqueIds.length;
-  const isFlip       = state.practiceMode === 'flip';
+  const sides        = state.practiceMode === 'flip' ? state.practiceSides : 'forward';
   const correctCount = uniqueIds.filter(id => {
     const r = state.practiceResults[id];
     if (!r) return false;
-    return isFlip ? (r.forward === true && r.reverse === true) : r.forward === true;
+    if (sides === 'forward') return r.forward === true;
+    if (sides === 'reverse') return r.reverse === true;
+    return r.forward === true && r.reverse === true;
   }).length;
   const acc = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
 
@@ -2500,9 +2511,10 @@ function renderPracticeCard() {
 
     h('div', { class: 'card-stage' },
       buildPracticeFlashcard(card, bInfo),
+      flipButton(() => !state.practiceAnimating && ((state.practiceFlipped = !state.practiceFlipped), render())),
       buildPracticeAnswerSection(),
       !state.practiceFlipped
-        ? h('p', { class: 'flip-prompt' }, 'Click the card or press ', h('kbd', { class: 'key-hint' }, 'Space'), ' to see the answer')
+        ? h('p', { class: 'flip-prompt' }, 'Press ', h('kbd', { class: 'key-hint' }, 'Space'), ' or use Flip to see the answer')
         : h('span', {}),
     ),
 
@@ -2563,7 +2575,6 @@ function buildPracticeFlashcard(card, bInfo) {
           h('p',    { class: 'card-sec-body'  }, card.description_lang1),
         )
       : null,
-    h('div', { class: 'card-hint' }, 'tap to reveal →'),
   );
 
   const backChildren = [
@@ -2590,9 +2601,6 @@ function buildPracticeFlashcard(card, bInfo) {
   const inner = h('div', { class: 'card-inner' }, front, back);
   return h('div', {
     class: `flashcard${state.practiceFlipped ? ' flipped' : ''}`,
-    onClick: () => {
-      if (!state.practiceAnimating) { state.practiceFlipped = !state.practiceFlipped; render(); }
-    },
   }, inner);
 }
 
