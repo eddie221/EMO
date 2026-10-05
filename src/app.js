@@ -1,6 +1,16 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
+// ── Theme ──────────────────────────────────────────────────────────────────
+function getTheme() {
+  try { return localStorage.getItem('emo-theme') === 'light' ? 'light' : 'dark'; } catch { return 'dark'; }
+}
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('emo-theme', theme); } catch {}
+}
+applyTheme(getTheme());
+
 // ── Constants ──────────────────────────────────────────────────────────────
 const BOX_COLORS = ['#e85d5d','#e8945d','#e8c85d','#8ad65d','#5db8e8','#a45de8'];
 
@@ -59,6 +69,7 @@ const state = {
   language: 'English',
   languages: ['English'],
   addingLanguage: false,
+  langMenuOpen: false,
   studyDay: 1,
   // study
   studySort: 'due',
@@ -313,16 +324,26 @@ function buildLanguageSwitcher() {
     return h('div', { class: 'lang-switcher' }, input);
   }
 
-  const sel = h('select', { class: 'field-input lang-select', title: 'Learning language' },
-    ...state.languages.map(l => h('option', { value: l }, l)),
-    h('option', { value: '__add__' }, '+ Add language…'),
+  const pick = name => { state.langMenuOpen = false; switchLanguage(name); render(); };
+  const menu = state.langMenuOpen
+    ? h('div', { class: 'lang-menu' },
+        ...state.languages.map(l => h('button', {
+          class: `lang-option${l === state.language ? ' active' : ''}`,
+          onClick: () => pick(l),
+        }, h('span', { class: 'lang-check' }, l === state.language ? icon('check2') : null), l)),
+        h('button', { class: 'lang-option add', onClick: () => {
+          state.langMenuOpen = false; state.addingLanguage = true; render();
+        } }, h('span', { class: 'lang-check' }), '+ Add language…'),
+      )
+    : null;
+  return h('div', { class: 'lang-switcher' },
+    h('button', {
+      class: `lang-trigger${state.langMenuOpen ? ' open' : ''}`,
+      title: 'Learning language',
+      onClick: () => { state.langMenuOpen = !state.langMenuOpen; render(); },
+    }, h('span', {}, state.language), icon('chevron-expand')),
+    menu,
   );
-  sel.value = state.language;
-  sel.addEventListener('change', e => {
-    if (e.target.value === '__add__') { state.addingLanguage = true; render(); }
-    else switchLanguage(e.target.value);
-  });
-  return h('div', { class: 'lang-switcher' }, icon('translate'), sel);
 }
 
 // ── Render dispatcher ─────────────────────────────────────────────────────────
@@ -3058,6 +3079,18 @@ function renderSettings() {
     ),
 
     h('div', { class: 'settings-card' },
+      h('h2', { class: 'settings-section-title' }, 'Appearance'),
+      h('p',  { class: 'settings-section-sub' }, 'Choose between the dark and bright theme.'),
+      h('div', { class: 'theme-options' },
+        ...[['dark', 'moon', 'Dark'], ['light', 'sun', 'Bright']].map(([t, ic, label]) =>
+          h('button', {
+            class: `theme-btn${getTheme() === t ? ' active' : ''}`,
+            onClick: () => { applyTheme(t); render(); },
+          }, icon(ic), label)),
+      ),
+    ),
+
+    h('div', { class: 'settings-card' },
       h('h2', { class: 'settings-section-title' }, 'Review Intervals (Boxes 1–5)'),
       h('p',  { class: 'settings-section-sub' },
         'Set how many days after a correct answer each box waits before the card is due again. ',
@@ -3408,6 +3441,10 @@ async function boot() {
   app.appendChild(shell);
   document.addEventListener('keydown', handleKeyNav);
   document.addEventListener('click', e => {
+    if (state.langMenuOpen && !e.target.closest('.lang-switcher')) {
+      state.langMenuOpen = false;
+      render();
+    }
     if (state.dotPopoverId && !e.target.closest('.dot-wrapper')) {
       state.dotPopoverId = null;
       render();
