@@ -2438,17 +2438,18 @@ function renderPractice() {
   return state.practiceMode === 'type' ? renderPracticeTypeCard() : renderPracticeCard();
 }
 
+// Which sides of a card a practice session tests (flip mode only has both/reverse).
+function practiceSidesNeeded() {
+  const sides = state.practiceMode === 'flip' ? state.practiceSides : 'forward';
+  return sides === 'both' ? ['forward', 'reverse'] : [sides];
+}
+const practiceDoneFor    = id => { const r = state.practiceResults[id]; return !!r && practiceSidesNeeded().every(s => r[s] !== null && r[s] !== undefined); };
+const practiceCorrectFor = id => { const r = state.practiceResults[id]; return !!r && practiceSidesNeeded().every(s => r[s] === true); };
+
 function renderPracticeDone() {
   const uniqueIds    = getUniqueIds(state.practiceQueue);
   const uniqueTotal  = uniqueIds.length;
-  const sides        = state.practiceMode === 'flip' ? state.practiceSides : 'forward';
-  const correctCount = uniqueIds.filter(id => {
-    const r = state.practiceResults[id];
-    if (!r) return false;
-    if (sides === 'forward') return r.forward === true;
-    if (sides === 'reverse') return r.reverse === true;
-    return r.forward === true && r.reverse === true;
-  }).length;
+  const correctCount = uniqueIds.filter(practiceCorrectFor).length;
   const acc = uniqueTotal > 0 ? Math.round((correctCount / uniqueTotal) * 100) : 0;
 
   return h('div', { class: 'study-done' },
@@ -2483,8 +2484,8 @@ function renderPracticeCard() {
   const bInfo        = getBoxes()[card.box_number - 1];
   const uniqueIds    = getUniqueIds(state.practiceQueue);
   const uniqueTotal  = uniqueIds.length;
-  const doneCount    = uniqueIds.filter(id => { const r = state.practiceResults[id]; return r && r.forward !== null && r.reverse !== null; }).length;
-  const correctCount = uniqueIds.filter(id => { const r = state.practiceResults[id]; return r && r.forward === true && r.reverse === true; }).length;
+  const doneCount    = uniqueIds.filter(practiceDoneFor).length;
+  const correctCount = uniqueIds.filter(practiceCorrectFor).length;
 
   return h('div', { class: 'study-wrap' },
     h('div', { class: 'study-header' },
@@ -2663,6 +2664,8 @@ function renderPracticeTypeCard() {
     if (result !== null) return;
     const correct = state.practiceTyped.trim().toLowerCase() === card.lang1.trim().toLowerCase();
     state.practiceTypedResult = correct ? 'correct' : 'wrong';
+    if (!state.practiceResults[card.id]) state.practiceResults[card.id] = { forward: null, reverse: null };
+    state.practiceResults[card.id].forward = correct;
     state.practiceTotal  += 1;
     if (correct) state.practiceCorrect += 1;
     render();
@@ -2689,7 +2692,7 @@ function renderPracticeTypeCard() {
     inp.value = state.practiceTyped;
     inp.disabled = result !== null;
     inp.addEventListener('input', e => { state.practiceTyped = e.target.value; });
-    inp.addEventListener('keydown', e => { if (e.key === 'Enter') submitAnswer(); });
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.stopPropagation(); submitAnswer(); } });
     if (result === null) setTimeout(() => inp.focus(), 50);
     return inp;
   })();
@@ -3407,6 +3410,16 @@ function handleKeyNav(e) {
       e.preventDefault();
       e.stopImmediatePropagation();
       state.practiceFlipped = !state.practiceFlipped;
+      render();
+      return;
+    }
+    if (e.key === 'Enter' && !e.repeat && state.practiceMode === 'type' && state.practiceTypedResult !== null) {
+      e.preventDefault();
+      const nextIdx = state.practiceIdx + 1;
+      if (nextIdx >= state.practiceQueue.length) state.practiceDone = true;
+      else state.practiceIdx = nextIdx;
+      state.practiceTyped = '';
+      state.practiceTypedResult = null;
       render();
       return;
     }
